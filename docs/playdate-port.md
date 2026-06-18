@@ -18,6 +18,96 @@ experiment's notes — the "why it didn't work" is the most valuable part.
 
 ---
 
+## Current project status
+
+### Goal
+
+Run PICO-8 carts on the Playdate's STM32F746 Cortex-M7 at native speed where
+possible, while preserving PICO-8 fixed-point semantics and reusing open8's
+z8lua VM and graphics API.
+
+### Current outcome
+
+The port boots embedded `.p8.png` carts, runs z8lua, renders to the Playdate's
+1-bit display, handles input, synthesizes audio, and supports in-memory
+`cartdata`/`dget`/`dset`.
+
+The earlier 6–13 fps “hardware ceiling” was an invalid conclusion from an
+unoptimized device build. Correcting the build raised Celeste gameplay to
+17–19 fps, and the later mutation-safe `foreach()` stack snapshot reached about
+20–21 fps before the full-height scaler was enabled. The project remains an
+active optimization effort toward 30 fps.
+
+Current implementation:
+
+- Playdate backend and SDL compatibility shim under `platform/playdate/`;
+- four embedded test carts: Celeste, Jelpi, Racer, and Picross;
+- centered 240×240 nearest-neighbor output with Bayer 4×4 dithering;
+- Playdate input and a platform-independent PICO-8 audio synth;
+- on-device update/draw/blit timing plus opt-in profiling controls;
+- packed two-pixel sprite processing for common aligned, unflipped draws;
+- mutation-safe `all()` and `foreach()` snapshots optimized for lower traffic;
+- compact 4 KiB 8→15 scaler LUT currently awaiting device measurement.
+
+Current bounded costs from the latest valid captures:
+
+- Celeste update: roughly 23–29 ms in ordinary gameplay;
+- Celeste full draw: roughly 20–22.5 ms;
+- Celeste no-fill draw: roughly 14.1 ms with the packed sprite path;
+- original 240×240 per-pixel scaler: 10.60 ms;
+- first 32 KiB scaler LUT: 23.3–23.9 ms, rejected;
+- 30 fps frame budget: 33.3 ms.
+
+### Corrected production configuration
+
+The Playdate build defaults single-config generators to Release. Expensive
+diagnostics are opt-in:
+
+- `OPEN8_PROFILE_LOAD=OFF`: no writes on every opcode/C call;
+- `OPEN8_PROFILE_TOOLS=OFF`: no skip-fill branch in production blitters;
+- `OPEN8_PROFILE_API=OFF`: no coarse API counter writes;
+- `OPEN8_ARENA_ALLOCATOR=OFF`: no experimental 4 MB arena;
+- `OPEN8_VM_GOTO=OFF`: compiler-generated switch dispatch remains faster.
+
+Static ARM comparison that exposed the invalid baseline:
+
+| property | unoptimized baseline | corrected Release |
+|---|---:|---:|
+| ELF text | 237,776 B | 186,240 B |
+| `luaV_execute` | 8,052 B | 5,548 B |
+| emitted `fix32_*` helpers | 90 | 0 |
+
+The Playdate SDK appends `-O2`, making it the effective optimization level.
+
+### Conclusions that remain valid
+
+- Raw DWT register access faults because Playdate game code is unprivileged.
+- ITCM relocation is unavailable because the OS protects it.
+- Playdate's built-in Lua cannot load arbitrary cart source at runtime and does
+  not implement PICO-8 syntax or 16.16 fixed-point semantics.
+- Computed-goto dispatch regresses under both the historical `-O0` build and the
+  corrected Release build; it is retired.
+- GC-off does not improve steady timing and does not remove the large Celeste
+  workload spikes.
+- The arena allocator produced no useful result in the historical build and is
+  not a current target.
+- The `foreach()` stack snapshot is a normal-frame win, but does not remove the
+  cart's occasional 258-call workload bursts.
+- Failed experiments remain documented because their device behavior constrains
+  future work—especially the Cortex-M7's sensitivity to large lookup tables.
+
+### Working rules
+
+- Device output is supplied manually by the tester. Never read or attach to the
+  Playdate serial console from the development host.
+- Deployment ends after copying and verifying the `.pdx`. Never invoke
+  `pdutil run` or otherwise launch the game automatically.
+- Validate semantic changes with the host suite before device deployment.
+- Keep experimental optimizations behind flags or isolate them with a measured
+  A/B whenever practical.
+
+---
+
 ## Why open8 is the port base
 
 open8 already *is* the player: z8lua VM (fixed-point, `fix32_t = int32_t`,
@@ -109,6 +199,11 @@ Budget: 33.3 ms/frame at 30 fps.
 - **Phase 3 — VM / data-cache**, data-driven. Target: 4RACER + Celeste 30 fps.
 - **Phase 4 — audio.** SFX→music, no fps regression.
 - **Phase 5 — polish / optional 1.875× scaler.**
+
+Current implementation note: Phase 5's scaler is now active. The 128×128
+framebuffer is rendered as a centered 240×240 image (1.875×) with Bayer 4×4
+dithering. Historical 1:1 and threshold-blit sections below describe the
+earlier milestones, not current HEAD.
 
 ## Build profiles
 
@@ -645,12 +740,14 @@ Production Release with the C-stack `foreach()` snapshot, Celeste gameplay
 | frame   | ~54 ms   | ~47 ms   | −7 ms |
 | fps     | 16–19    | ~20–21   | +3–4 |
 
-Removing the six per-draw-frame snapshot allocations took ~5.5 ms off draw, and
-**the 330–358 ms `foreach`-storm update spikes are gone** — worst `t_update` in
-the whole capture is 33.6 ms (was 330+). A clear win on both throughput and
-frame-time consistency. Remaining gap to 30 fps (33.3 ms): ~14 ms off a ~47 ms
-frame, now split roughly evenly update (~23 ms) / draw (~22.5 ms, ~10 ms of which
-is pixel fill per the skip-fill split).
+Removing the six per-draw-frame snapshot allocations took ~5.5 ms off draw. In
+that A/B capture, the 330–358 ms `foreach`-storm update spikes were absent and
+the worst `t_update` was 33.6 ms. A later scaler capture did contain two more
+bursts: 306.9 ms and 262.5 ms, each again coinciding with 258 `foreach()` calls
+and about 3,072–3,077 items. Therefore the stack snapshot improves each call and
+normal frame throughput, but does **not** eliminate the cart's genuine 258-call
+burst workload. Remaining gap to 30 fps (33.3 ms): ~14 ms off a ~47 ms
+pre-scaler frame, split roughly evenly between update and draw.
 
 Next levers: re-test computed-goto at the corrected Release baseline (its `-O0`
 regression premise — interpreter past I-cache — may have flipped now that
@@ -681,4 +778,63 @@ Standing optimization picture (production = switch + foreach opt, ~20–21 fps,
 The graphics fill path (~10 ms of draw, per the skip-fill split) is the next
 bounded target; the residual VM/update cost is the genuinely memory-bound part.
 
-See [POSTMORTEM.md](POSTMORTEM.md) for the full retrospective.
+#### 240×240 Bayer scaler + packed sprite fast path — first baseline
+
+Current HEAD adds two graphics changes after the measurements above:
+
+- `draw_sprite_n()` processes two aligned, opaque pixels per iteration for
+  unflipped sprites at even destination X, covering the common `map()` case;
+- the final display pass now scales 128×128 to a centered 240×240 image and
+  applies Bayer 4×4 dithering.
+
+The first supplied capture with the scaler enabled did not contain the requested
+no-fill phase: there is no `skip_fill` transition, and the system menu instead
+switches from Celeste to Jelpi and Racer. The Celeste gameplay portion is still
+enough to establish the display-pass cost:
+
+| metric | median |
+|---|---:|
+| t_update | 26.45 ms |
+| t_draw | 20.63 ms |
+| t_blit | **10.60 ms** |
+| summed frame | 56.03 ms |
+| measured fps | 16–17 |
+
+The old centered 128×128 conversion was ~1.2 ms, so scaling and dithering
+240×240 destination pixels added roughly **9.4 ms/frame**. This makes the display
+pass a bounded, high-value target.
+
+The first 15:8 expansion attempt was a clear regression. Its 32 KiB table used
+four `uint16_t[256]` contribution tables for every Bayer X/Y phase. Device
+medians from the controlled capture:
+
+| mode | t_update | t_draw | t_blit | summed frame | fps |
+|---|---:|---:|---:|---:|---:|
+| full, first | 26.77 ms | 20.52 ms | **23.94 ms** | 70.43 ms | 14 |
+| no-fill | 28.63 ms | **14.14 ms** | **23.70 ms** | 65.49 ms | 15 |
+| full, restored | 28.65 ms | 20.26 ms | **23.34 ms** | 72.22 ms | 14 |
+
+The table more than doubled display time versus the 10.60 ms per-pixel scaler.
+The data-dependent 32 KiB working set is a poor fit for the Cortex-M7 cache.
+The no-fill split does show that C-side rendering now costs about **6.3 ms**,
+down from the earlier 10–11 ms; the packed sprite path is likely contributing,
+though the captures are not a strict sprite-only A/B.
+
+Implemented for the next build: a compact form of the same 15:8 idea. The four
+source bytes in a group all start on the same Bayer phase, so their expanded
+four-bit values can share one table and be shifted while composing the result.
+This removes redundant shifted copies and reduces the palette-aware LUT from
+32 KiB to **4 KiB**, while retaining four table reads per 15 output pixels. It
+is rebuilt only when the 16-byte display palette changes, preserving `pal()`.
+Benchmark lines always include `nofill=` and `gcoff=`.
+
+Next capture protocol, using one repeatable Celeste gameplay scene:
+
+1. Run full rendering for 15–20 seconds.
+2. Enable `no fill` and run for 15–20 seconds.
+3. Disable `no fill` and run the same scene for another 15–20 seconds.
+4. Supply the `cart=`, `api_u`, and `api_d` lines manually. Confirm that the
+   `cart=` lines show `nofill=0`, then `nofill=1`, then `nofill=0`.
+
+Do not attach to the device console from the development host, and do not launch
+the game automatically after deployment.
