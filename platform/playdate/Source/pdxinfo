@@ -1,0 +1,7 @@
+name=open8
+author=Pomettini & Michael Fitzmayer
+description=PICO-8 player for Playdate
+bundleID=com.pomettini.open8
+version=0.1
+buildNumber=1
+imagePath=

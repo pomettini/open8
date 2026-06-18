@@ -403,39 +403,20 @@ static void patch_cart_code(cart_t* cart)
     cart->code_size = new_size;
 }
 
-static int load_cart(SDL_Renderer* renderer, const char* file_name, cart_t* cart)
+// Load a cart from a PNG image already in memory (the .p8.png steganography
+// format). Does not take ownership of `data` — the caller frees it. Split out
+// of load_cart so the Playdate backend can load an embedded cart without a
+// filesystem.
+static int load_cart_bytes(SDL_Renderer* renderer, const uint8_t* data, long file_size, cart_t* cart)
 {
     int width, height, bpp;
-
-    FILE* file = fopen(file_name, "rb");
-    if (!file)
-    {
-        SDL_Log("Couldn't open file: %s", file_name);
-        return 0;
-    }
-
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    uint8_t* data = (uint8_t*)SDL_calloc(file_size, sizeof(uint8_t));
-    if (!data)
-    {
-        SDL_Log("Couldn't allocate memory for cart data");
-        fclose(file);
-        return 0;
-    }
-    fread(data, 1, file_size, file);
-    fclose(file);
 
     uint8_t* image_data = stbi_load_from_memory(data, file_size, &width, &height, &bpp, 4);
     if (!image_data)
     {
         SDL_Log("Couldn't load image data: %s", stbi_failure_reason());
-        SDL_free(data);
         return 0;
     }
-    SDL_free(data);
 
     if (width != CART_WIDTH || height != CART_HEIGHT)
     {
@@ -532,6 +513,34 @@ static int load_cart(SDL_Renderer* renderer, const char* file_name, cart_t* cart
     }
 
     return 1;
+}
+
+static int load_cart(SDL_Renderer* renderer, const char* file_name, cart_t* cart)
+{
+    FILE* file = fopen(file_name, "rb");
+    if (!file)
+    {
+        SDL_Log("Couldn't open file: %s", file_name);
+        return 0;
+    }
+
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    uint8_t* data = (uint8_t*)SDL_calloc(file_size, sizeof(uint8_t));
+    if (!data)
+    {
+        SDL_Log("Couldn't allocate memory for cart data");
+        fclose(file);
+        return 0;
+    }
+    fread(data, 1, file_size, file);
+    fclose(file);
+
+    int rc = load_cart_bytes(renderer, data, file_size, cart);
+    SDL_free(data);
+    return rc;
 }
 
 static void destroy_cart(cart_t* cart)
@@ -1385,3 +1394,51 @@ bool iterate_core(SDL_Renderer* renderer)
 
     return true;
 }
+
+#ifdef OPEN8_PLATFORM_PLAYDATE
+// Playdate entry points. These live in core.c so they can reuse the existing
+// static helpers (run_cartridge, call_pico8_function, ...) and statics (vm,
+// cart, has_update, ...) without duplicating any logic. The renderer is a
+// sentinel; the SDL shim ignores it. Profiling/timing and the framebuffer blit
+// are owned by platform/playdate/pd_main.c, which calls update and draw
+// separately so it can time each split.
+static SDL_Renderer* const pd_dummy_renderer = (SDL_Renderer*)1;
+
+bool core_pd_init(void)
+{
+    return init_memory(pd_dummy_renderer);
+}
+
+bool core_pd_boot_cart(const uint8_t* data, long size)
+{
+    if (!load_cart_bytes(pd_dummy_renderer, data, size, &cart))
+    {
+        return false;
+    }
+    return run_cartridge(pd_dummy_renderer);
+}
+
+void core_pd_update(void)
+{
+    if (has_update)
+    {
+        update_input(pd_dummy_renderer);
+        call_pico8_function(vm, "_update");
+    }
+    else if (has_update60)
+    {
+        update_input(pd_dummy_renderer);
+        call_pico8_function(vm, "_update60");
+    }
+}
+
+void core_pd_draw(void)
+{
+    if (has_draw)
+    {
+        reset_draw_state();
+        call_pico8_function(vm, "_draw");
+    }
+    update_time();
+}
+#endif // OPEN8_PLATFORM_PLAYDATE

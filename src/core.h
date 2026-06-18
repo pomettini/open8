@@ -49,4 +49,12 @@ void destroy_core(void);
 bool handle_events(SDL_Renderer* renderer, SDL_Event* event);
 bool iterate_core(SDL_Renderer* renderer);
 
+#ifdef OPEN8_PLATFORM_PLAYDATE
+// Playdate backend entry points (implemented in core.c). See pd_main.c.
+bool core_pd_init(void);
+bool core_pd_boot_cart(const uint8_t* data, long size);
+void core_pd_update(void);
+void core_pd_draw(void);
+#endif
+
 #endif // CORE_H
