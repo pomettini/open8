@@ -2,6 +2,7 @@
 !.gitignore
 .vs
 out
+build/
 
 # Claude Code
 .claude/
