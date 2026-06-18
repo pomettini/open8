@@ -256,3 +256,99 @@ flag and device-measured:
   per-call `Error calling _draw` log spams serial and inflates its own timing —
   rate-limit VM error logging.
 - `menuitem`, `music`, `sfx`, `cartdata`, `dget` all log "not yet implemented".
+
+### 2026-06-18 — Phase 2 experiment #1: computed-goto VM dispatch
+
+`OPEN8_VM_GOTO` (lvm.c): replaces the interpreter's `switch(op)` with a
+token-threaded computed `goto` — each opcode handler ends with its own
+fetch+indirect-jump, so the branch predictor sees many distinct dispatch sites
+instead of one. Jump table uses designated initialisers (`[OP_X]=&&L_OP_X`) so a
+missing opcode is a compile error, not a silent mis-dispatch; all 53 z8lua
+opcodes (incl. PICO-8 PEEK/PEEK2/PEEK4/LSHR/ROTL/ROTR) verified present. SDL
+build keeps the `switch` path. Enabled for the Playdate build via CMake.
+
+**Correctness gate (host):** built z8lua standalone both ways and ran a
+deterministic opcode workout (numeric/generic for, recursion, calls, array+hash
+tables, closures/upvalues, concat+format, comparisons, methods, bitwise, peek) —
+**byte-identical output** switch vs goto. So the rewrite is behaviour-preserving.
+
+Expectation / diagnostic value: if dispatch was a real cost we should see
+`t_update`/`t_draw` (the VM portions) drop ~10–20%; `t_blit` and the C-fill
+delta should be unchanged. **If the win is small, that itself is the finding** —
+it confirms the VM is bound by *data*-cache misses (the Nofrendo prior), not
+dispatch, and Phase 2 pivots to Lua data layout / GC rather than the interpreter.
+
+Compare against the switch baseline already recorded above:
+celeste gameplay t_update ~27.5 ms / t_draw ~43 ms; jelpi t_update ~142 ms;
+picross t_draw ~63 ms.
+
+**RESULT — FAILED EXPERIMENT (regressed). Disabled.**
+
+| cart | switch | computed-goto | Δ |
+|---|---|---|---|
+| celeste `t_update` | ~27.5 ms | ~28.8 ms | +5% |
+| celeste `t_draw`   | ~43 ms   | ~46.4 ms | +8% |
+| jelpi `t_update`   | ~142 ms  | ~155 ms  | +9% |
+| jelpi `t_draw`     | ~22 ms   | ~22.5 ms | ~0 |
+
+Computed-goto made every VM number *worse*. Interpretation: **dispatch is not the
+bottleneck — the VM is memory-bound** (the Nofrendo prior, confirmed). Token
+threading inlines fetch+dispatch at ~50 sites, bloating `luaV_execute` well past
+the 16 KB I-cache; with no dispatch win to offset the added I-cache misses, it's a
+net loss. `t_blit` stayed flat ~3.7 ms throughout, as predicted.
+
+This is a *useful* null result: it rules out the interpreter loop and points
+Phase 2 at **data/instruction cache and memory traffic**, not the dispatch
+mechanism. Code kept behind `OPEN8_VM_GOTO` (disabled in CMake) to reproduce.
+
+#### Reframed Phase 2 targets (post computed-goto)
+- The wall is the VM's *memory* behaviour. Two sub-questions to separate
+  "carts simply do a lot" from "carts hit a slow per-instruction cost":
+  - **Characterise the load:** count bytecode instructions + C-API calls per
+    frame (behind the profile flag). If jelpi executes ~5× the bytecode of
+    celeste, its 155 ms is algorithmic (heavy cart), not a fixable hot spot; if
+    similar bytecode but 5× time, it's cache/per-op cost.
+  - **GC:** celeste's `t_update` 900 ms spikes are GC hitches (room init) — tune
+    `LUA_GCSETPAUSE/STEPMUL` or step per frame. Smooths spikes; won't move
+    jelpi's steady 155 ms.
+- Lua object/table memory layout (reduce pointer-chasing / TValue traffic) is
+  the deeper, harder lever the data points to — pursue only once the load
+  characterisation says per-op cost (not raw volume) is the problem.
+
+### 2026-06-18 — Phase 2 experiment #2: load characterizer (counts/frame)
+
+Per-frame bytecode-instruction and C-call counts (read+reset around update/draw;
+counter inflates *timing* in this build — read counts, not times):
+
+| cart | upd instrs | upd C-calls | drw instrs | drw C-calls |
+|---|---|---|---|---|
+| celeste (title)    | 49     | 3   | 981  | 91  |
+| celeste (gameplay) | ~1 621 | ~108 | ~1 625 | ~120 |
+| celeste (room load)| 17 409 | 534 | 1 657 | 121 |
+| jelpi              | ~13 634 | ~2 103 | 158 | 20 |
+| racer (errors)     | 30 | 3 | 9 342 | 445 |
+
+**The decisive finding: bytecode execution is cheap.** Even jelpi's 13.6k
+instrs/frame ≈ 4 ms at 50 cyc/op; celeste's 1.6k ≈ 0.5 ms. Yet clean frames are
+27 ms / 155 ms. So **~95% of VM time is NOT interpretation** — it's GC + the
+C-call/allocator path. This *explains why computed-goto regressed*: there is
+almost no dispatch to optimise.
+
+- The 775 ms celeste frame (17k instrs) is a **full GC** on room load.
+- Steady celeste = ~0.5 ms bytecode inside ~27 ms → **GC stepping + allocator
+  churn dominate**. (Celeste holds 114 KB Lua heap, allocates objects/particles
+  every frame.)
+- jelpi does ~8× the instrs and ~20× the C-calls of celeste but the same cost
+  shape — **algorithmically heavier, not a hot path**. No targeted fix.
+
+#### Phase 2 target (now firmly indicated): GC + allocator, not the interpreter
+
+The allocator is `pd->system->realloc` (a general-purpose heap); GC alloc/free
+churn likely pays that cost thousands of times/frame.
+
+Next experiment — **GC-off diagnostic** (cheap, decisive): a menu toggle calling
+`lua_gc(L, LUA_GCSTOP/RESTART)`. If update time collapses with GC stopped → GC
+is the wall → then tune it (generational mode, or incremental pause/stepmul, or
+a per-frame step budget; possibly pool allocations to dodge `pdrealloc`). If it
+*doesn't* collapse → the cost is the C-call/allocator path itself, investigate
+that. Either way the next number is the answer.

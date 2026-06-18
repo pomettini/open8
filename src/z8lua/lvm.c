@@ -578,24 +578,92 @@ void luaV_finishOp (lua_State *L) {
         } \
         else { Protect(luaV_arith(L, ra, rb, rb, tm)); } }
 
+#ifdef OPEN8_VM_GOTO
+/* Token-threaded dispatch via GCC/Clang computed goto. Each opcode handler ends
+ * with its OWN fetch + indirect jump (vmbreak), giving the branch predictor many
+ * distinct dispatch sites instead of one shared switch. Enabled for the Playdate
+ * build (Phase 2). See docs/playdate-port.md. The jump table and the i/ra decls
+ * live in luaV_execute under the same guard. */
+#define vmdispatch(o)	goto *disptab[o];
+#define vmcase(l,b)	L_##l: {b} vmbreak;
+#define vmcasenb(l,b)	L_##l: {b}		/* nb = no break: falls to next label */
+#define vmfetch() { \
+    i = *(ci->u.l.savedpc++); \
+    OPEN8_COUNT_INSTR(); \
+    if ((L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)) && \
+        (--L->hookcount == 0 || L->hookmask & LUA_MASKLINE)) \
+      Protect(traceexec(L)); \
+    ra = RA(i); }
+#define vmbreak		vmfetch(); vmdispatch(GET_OPCODE(i));
+#else
 #define vmdispatch(o)	switch(o)
 #define vmcase(l,b)	case l: {b}  break;
 #define vmcasenb(l,b)	case l: {b}		/* nb = no break */
+#endif
+
+#ifdef OPEN8_PLATFORM_PLAYDATE
+/* Phase 2 load characterizer: bytecode instructions and C-function calls
+ * executed, read+reset per phase by pd_main. This inflates VM timing in the
+ * profile build (one global increment per opcode) — read the *counts*, not the
+ * times, in this build. See docs/playdate-port.md. */
+uint32_t open8_vm_instr_count = 0;
+uint32_t open8_vm_ccall_count = 0;
+#define OPEN8_COUNT_INSTR()  (open8_vm_instr_count++)
+#define OPEN8_COUNT_CCALL()  (open8_vm_ccall_count++)
+#else
+#define OPEN8_COUNT_INSTR()  ((void)0)
+#define OPEN8_COUNT_CCALL()  ((void)0)
+#endif
 
 void luaV_execute (lua_State *L) {
   CallInfo *ci = L->ci;
   LClosure *cl;
   TValue *k;
   StkId base;
+#ifdef OPEN8_VM_GOTO
+  Instruction i;
+  StkId ra;
+  /* Computed-goto jump table. Designated initialisers ([OP_X]=&&L_OP_X) make the
+   * order match the OpCode enum automatically, and a missing opcode is a compile
+   * error rather than a silent mis-dispatch. */
+  static const void *const disptab[NUM_OPCODES] = {
+    [OP_MOVE]=&&L_OP_MOVE, [OP_LOADK]=&&L_OP_LOADK, [OP_LOADKX]=&&L_OP_LOADKX,
+    [OP_LOADBOOL]=&&L_OP_LOADBOOL, [OP_LOADNIL]=&&L_OP_LOADNIL,
+    [OP_GETUPVAL]=&&L_OP_GETUPVAL, [OP_GETTABUP]=&&L_OP_GETTABUP,
+    [OP_GETTABLE]=&&L_OP_GETTABLE, [OP_SETTABUP]=&&L_OP_SETTABUP,
+    [OP_SETUPVAL]=&&L_OP_SETUPVAL, [OP_SETTABLE]=&&L_OP_SETTABLE,
+    [OP_NEWTABLE]=&&L_OP_NEWTABLE, [OP_SELF]=&&L_OP_SELF, [OP_ADD]=&&L_OP_ADD,
+    [OP_SUB]=&&L_OP_SUB, [OP_MUL]=&&L_OP_MUL, [OP_DIV]=&&L_OP_DIV,
+    [OP_MOD]=&&L_OP_MOD, [OP_POW]=&&L_OP_POW, [OP_IDIV]=&&L_OP_IDIV,
+    [OP_BAND]=&&L_OP_BAND, [OP_BOR]=&&L_OP_BOR, [OP_BXOR]=&&L_OP_BXOR,
+    [OP_SHL]=&&L_OP_SHL, [OP_SHR]=&&L_OP_SHR, [OP_LSHR]=&&L_OP_LSHR,
+    [OP_ROTL]=&&L_OP_ROTL, [OP_ROTR]=&&L_OP_ROTR, [OP_UNM]=&&L_OP_UNM,
+    [OP_BNOT]=&&L_OP_BNOT, [OP_NOT]=&&L_OP_NOT, [OP_PEEK]=&&L_OP_PEEK,
+    [OP_PEEK2]=&&L_OP_PEEK2, [OP_PEEK4]=&&L_OP_PEEK4, [OP_LEN]=&&L_OP_LEN,
+    [OP_CONCAT]=&&L_OP_CONCAT, [OP_JMP]=&&L_OP_JMP, [OP_EQ]=&&L_OP_EQ,
+    [OP_LT]=&&L_OP_LT, [OP_LE]=&&L_OP_LE, [OP_TEST]=&&L_OP_TEST,
+    [OP_TESTSET]=&&L_OP_TESTSET, [OP_CALL]=&&L_OP_CALL,
+    [OP_TAILCALL]=&&L_OP_TAILCALL, [OP_RETURN]=&&L_OP_RETURN,
+    [OP_FORLOOP]=&&L_OP_FORLOOP, [OP_FORPREP]=&&L_OP_FORPREP,
+    [OP_TFORCALL]=&&L_OP_TFORCALL, [OP_TFORLOOP]=&&L_OP_TFORLOOP,
+    [OP_SETLIST]=&&L_OP_SETLIST, [OP_CLOSURE]=&&L_OP_CLOSURE,
+    [OP_VARARG]=&&L_OP_VARARG, [OP_EXTRAARG]=&&L_OP_EXTRAARG,
+  };
+#endif
  newframe:  /* reentry point when frame changes (call/return) */
   lua_assert(ci == L->ci);
   cl = clLvalue(ci->func);
   k = cl->p->k;
   base = ci->u.l.base;
   /* main loop of interpreter */
+#ifdef OPEN8_VM_GOTO
+  vmfetch();
+  vmdispatch (GET_OPCODE(i)) {
+#else
   for (;;) {
     Instruction i = *(ci->u.l.savedpc++);
     StkId ra;
+    OPEN8_COUNT_INSTR();
     if ((L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)) &&
         (--L->hookcount == 0 || L->hookmask & LUA_MASKLINE)) {
       Protect(traceexec(L));
@@ -605,6 +673,7 @@ void luaV_execute (lua_State *L) {
     lua_assert(base == ci->u.l.base);
     lua_assert(base <= L->top && L->top < L->stack + L->stacksize);
     vmdispatch (GET_OPCODE(i)) {
+#endif
       vmcase(OP_MOVE,
         setobjs2s(L, ra, RB(i));
       )
@@ -794,6 +863,7 @@ void luaV_execute (lua_State *L) {
         int nresults = GETARG_C(i) - 1;
         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
         if (luaD_precall(L, ra, nresults)) {  /* C function? */
+          OPEN8_COUNT_CCALL();
           if (nresults >= 0) L->top = ci->top;  /* adjust results */
           base = ci->u.l.base;
         }
@@ -807,8 +877,10 @@ void luaV_execute (lua_State *L) {
         int b = GETARG_B(i);
         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
         lua_assert(GETARG_C(i) - 1 == LUA_MULTRET);
-        if (luaD_precall(L, ra, LUA_MULTRET))  /* C function? */
+        if (luaD_precall(L, ra, LUA_MULTRET)) {  /* C function? */
+          OPEN8_COUNT_CCALL();
           base = ci->u.l.base;
+        }
         else {
           /* tail call: put called frame (n) in place of caller one (o) */
           CallInfo *nci = L->ci;  /* called frame */
@@ -955,6 +1027,8 @@ void luaV_execute (lua_State *L) {
         lua_assert(0);
       )
     }
+#ifndef OPEN8_VM_GOTO
   }
+#endif
 }
 

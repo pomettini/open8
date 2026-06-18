@@ -71,6 +71,11 @@ else()
 endif()
 
 target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PLATFORM_PLAYDATE=1)
+# Phase 2 experiment #1 (computed-goto VM dispatch) REGRESSED on device — the
+# VM is memory-bound, not dispatch-bound, and threading bloats the interpreter
+# past the 16KB I-cache. Left in lvm.c behind the flag but disabled. See
+# docs/playdate-port.md. Re-enable only to reproduce the negative result.
+# target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_VM_GOTO=1)
 
 target_include_directories(${OPEN8_TARGET} PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}          # generated/cart_celeste.h

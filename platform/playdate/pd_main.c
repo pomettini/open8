@@ -23,10 +23,12 @@
 #include "auxiliary.h"   /* color_lookup */
 #include "pdshim.h"
 
-/* Declared in api.c. Not via api.h: that header pulls z8lua's lua.h, whose
- * lua_State typedef collides with the Playdate SDK's pd_api_lua.h. */
+/* Declared in api.c / lvm.c. Not via their headers: those pull z8lua's lua.h,
+ * whose lua_State typedef collides with the Playdate SDK's pd_api_lua.h. */
 #ifdef OPEN8_PLATFORM_PLAYDATE
 extern int open8_profile_skip_fill;
+extern uint32_t open8_vm_instr_count;   /* bytecode ops executed (load characterizer) */
+extern uint32_t open8_vm_ccall_count;   /* C-function calls executed */
 #endif
 
 #include "SDL3/SDL.h"    /* SDL_GAMEPAD_BUTTON_* (so the button mapping stays in sync) */
@@ -188,12 +190,24 @@ static int update(void* userdata)
 
     if (g_log_first) pd->system->logToConsole("open8: frame1 begin");
 
+    uint32_t ui = 0, uc = 0, di = 0, dc = 0; /* per-phase load counts */
+
     uint32_t t0 = pd_shim_ticks();
     poll_input();
+#ifdef OPEN8_PLATFORM_PLAYDATE
+    open8_vm_instr_count = 0; open8_vm_ccall_count = 0;
+#endif
     core_pd_update();
+#ifdef OPEN8_PLATFORM_PLAYDATE
+    ui = open8_vm_instr_count; uc = open8_vm_ccall_count;
+    open8_vm_instr_count = 0; open8_vm_ccall_count = 0;
+#endif
     if (g_log_first) pd->system->logToConsole("open8: frame1 update ok");
     uint32_t t1 = pd_shim_ticks();
     core_pd_draw();
+#ifdef OPEN8_PLATFORM_PLAYDATE
+    di = open8_vm_instr_count; dc = open8_vm_ccall_count;
+#endif
     if (g_log_first) pd->system->logToConsole("open8: frame1 draw ok");
     uint32_t t2 = pd_shim_ticks();
 
@@ -236,12 +250,14 @@ static int update(void* userdata)
     if (now_ms - last_log_ms >= 1000)
     {
         last_log_ms = now_ms;
-        pd->system->logToConsole("cart=%s nofill=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus",
+        pd->system->logToConsole("cart=%s nofill=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus  | upd[i=%lu c=%lu] drw[i=%lu c=%lu]",
                                  g_carts[g_cart_index].name, skip,
                                  (int)(fps + 0.5f),
                                  (unsigned long)us_update,
                                  (unsigned long)us_draw,
-                                 (unsigned long)us_blit);
+                                 (unsigned long)us_blit,
+                                 (unsigned long)ui, (unsigned long)uc,
+                                 (unsigned long)di, (unsigned long)dc);
     }
 
     return 1;
