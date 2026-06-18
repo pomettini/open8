@@ -23,7 +23,9 @@ endif()
 
 option(OPEN8_PROFILE_LOAD "Count every Lua opcode and C call" OFF)
 option(OPEN8_PROFILE_TOOLS "Build runtime skip-fill profiling controls" OFF)
+option(OPEN8_PROFILE_API "Count selected API calls separately for update/draw" OFF)
 option(OPEN8_ARENA_ALLOCATOR "Use the experimental Lua arena allocator" OFF)
+option(OPEN8_VM_GOTO "Token-threaded (computed-goto) VM dispatch — re-test at Release" OFF)
 
 set(ENVSDK $ENV{PLAYDATE_SDK_PATH})
 if (NOT "${ENVSDK}" STREQUAL "")
@@ -87,14 +89,19 @@ else()
 endif()
 
 target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PLATFORM_PLAYDATE=1)
-# The original computed-goto experiment regressed in an unoptimized build.
-# Keep it disabled until it is re-tested against the corrected Release baseline.
-# target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_VM_GOTO=1)
+# Computed-goto regressed in the original -O0 build; re-testable at Release via
+# -DOPEN8_VM_GOTO=ON now that the optimized luaV_execute is far smaller.
+if (OPEN8_VM_GOTO)
+	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_VM_GOTO=1)
+endif()
 if (OPEN8_PROFILE_LOAD)
 	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PROFILE_LOAD=1)
 endif()
 if (OPEN8_PROFILE_TOOLS)
 	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PROFILE_TOOLS=1)
+endif()
+if (OPEN8_PROFILE_API)
+	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PROFILE_API=1)
 endif()
 if (OPEN8_ARENA_ALLOCATOR)
 	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_ARENA_ALLOC=1)
@@ -112,6 +119,7 @@ target_compile_options(${OPEN8_TARGET} PRIVATE -Wno-unused-parameter -Wno-sign-c
 message(STATUS "open8 Playdate build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "open8 load counters: ${OPEN8_PROFILE_LOAD}")
 message(STATUS "open8 profiling tools: ${OPEN8_PROFILE_TOOLS}")
+message(STATUS "open8 API counters: ${OPEN8_PROFILE_API}")
 message(STATUS "open8 arena allocator: ${OPEN8_ARENA_ALLOCATOR}")
 
 include(${SDK}/C_API/buildsupport/playdate_game.cmake)

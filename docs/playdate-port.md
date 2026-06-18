@@ -139,6 +139,14 @@ cmake --build platform/playdate/build-profile
 Keep `OPEN8_PROFILE_LOAD=OFF` while timing; its global counter increments occur
 for every Lua instruction and C call.
 
+Device logs are captured manually by the tester. Do not attach to or read the
+Playdate serial console from the development host; analyze only logs supplied
+by the tester.
+
+Device deployment is also manual after copying: push/copy the `.pdx` to the
+Playdate, then stop. Never invoke `pdutil run` or otherwise launch the game
+automatically; the tester launches it on the device.
+
 ---
 
 ## Log
@@ -553,20 +561,124 @@ retracts the “6–13 fps hardware ceiling.” The remaining Celeste frame is r
 48–52 ms; reaching 30 fps requires removing another ~15–19 ms, about a further
 1.5× improvement rather than the previous apparent 2.5–3× gap.
 
+#### Corrected Release skip-fill result
+
+The tester captured a full → no-fill → full sequence during Celeste gameplay.
+Obvious transition/outlier frames were excluded. Median values:
+
+| mode | t_update | t_draw | t_blit | measured fps | summed frame |
+|---|---:|---:|---:|---:|---:|
+| full, first run | 25.7 ms | 28.0 ms | 1.17 ms | 16 | 54.4 ms |
+| no-fill | 21.4 ms | **18.3 ms** | 1.27 ms | **23** | **42.0 ms** |
+| full, restored | 27.5 ms | 29.3 ms | 1.17 ms | 16 | 57.9 ms |
+
+The graphics fill path is worth approximately **10–11 ms/frame**, a substantial
+target, but removing it completely still leaves about 42 ms/frame. Graphics
+optimization alone therefore cannot reach the 33.3 ms budget. The next win must
+combine a faster graphics path with roughly another 9 ms reduction in VM/API
+work.
+
+#### Coarse API counter result
+
+The supplied capture had `skip_fill = 1` enabled before gameplay and did not
+switch it off, so these are no-fill measurements. Excluding the three large
+transition/update spikes, 26 gameplay samples produced:
+
+| metric | median |
+|---|---:|
+| update | 29.1 ms |
+| draw | 16.7 ms |
+| blit | 1.15 ms |
+| fps | 20 |
+| update `foreach()` | 1 call / 4.5 copied items |
+| draw `foreach()` | 6 calls / 56.5 copied items |
+| draw graphics calls | 64 total: 52 primitives, 7.5 `spr`, 3 `map` |
+
+`all()` was never called. The initial suspicion was therefore wrong:
+Celeste's hot mutation-safe iterator is `foreach()`. Three update spikes of
+332–358 ms each coincided exactly with 258 `foreach()` calls copying about
+3,077 items. Normal update frames use only one small `foreach()`, while draw
+consistently allocates and fills six snapshot tables.
+
 #### Next experiment
 
-Re-establish the component split under the corrected baseline:
+Build Release with both coarse controls enabled:
 
-1. Build Release with `OPEN8_PROFILE_TOOLS=ON`, while keeping
-   `OPEN8_PROFILE_LOAD=OFF` and `OPEN8_ARENA_ALLOCATOR=OFF`.
-2. Measure full vs no-fill for Celeste gameplay and each embedded test cart.
-3. If no-fill moves Celeste below ~33 ms total, focus on direct graphics paths
-   (`map`/`spr`, packed-nibble writes, palette lookup reuse).
-4. If VM time still dominates, instrument C functions by coarse category—not
-   per opcode—and test whether repeated `all()` snapshots/object iteration are
-   the update/draw hot path.
+```sh
+cmake -S platform/playdate -B platform/playdate/build-profile \
+  -G "Unix Makefiles" \
+  -DCMAKE_TOOLCHAIN_FILE="$PLAYDATE_SDK_PATH/C_API/buildsupport/arm.cmake" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DOPEN8_PROFILE_TOOLS=ON \
+  -DOPEN8_PROFILE_API=ON \
+  -DOPEN8_PROFILE_LOAD=OFF \
+  -DOPEN8_ARENA_ALLOCATOR=OFF
+cmake --build platform/playdate/build-profile
+```
 
-Do not retest computed-goto, GC, or the arena until this optimized full/no-fill
-baseline exists.
+`OPEN8_PROFILE_API` records selected counters separately for update and draw:
+`all()` calls/items copied, `add`/`del`/shift work, `foreach`, and graphics calls
+split into primitives, print, `spr`, `sspr`, and `map`. It adds only coarse API
+increments—no per-opcode VM writes.
+
+The next targeted change is a cheaper mutation-safe `foreach()` snapshot,
+followed by an A/B device build. Keep the graphics work as the parallel target:
+normal draw frames make about 52 primitive calls plus 5–13 sprite calls.
+
+Implemented for the next device build: `foreach()` now keeps its compact
+snapshot directly on the current Lua C-call stack. The values remain GC-rooted
+while callbacks execute, preserving the previous mutation-safe behavior while
+removing one temporary table allocation plus all `rawseti`/`rawgeti` traffic per
+call. The host suite includes a callback that deletes and adds source elements
+while verifying that the original values are still visited.
+
+#### foreach() snapshot optimization — device A/B result
+
+Production Release with the C-stack `foreach()` snapshot, Celeste gameplay
+(medians, title frames excluded):
+
+| metric | Release baseline | + foreach opt | Δ |
+|---|---:|---:|---:|
+| t_draw  | ~28 ms   | ~22.5 ms | −5.5 ms |
+| t_update| ~25.7 ms | ~23 ms   | −2.7 ms |
+| t_blit  | ~1.2 ms  | ~1.2 ms  | — |
+| frame   | ~54 ms   | ~47 ms   | −7 ms |
+| fps     | 16–19    | ~20–21   | +3–4 |
+
+Removing the six per-draw-frame snapshot allocations took ~5.5 ms off draw, and
+**the 330–358 ms `foreach`-storm update spikes are gone** — worst `t_update` in
+the whole capture is 33.6 ms (was 330+). A clear win on both throughput and
+frame-time consistency. Remaining gap to 30 fps (33.3 ms): ~14 ms off a ~47 ms
+frame, now split roughly evenly update (~23 ms) / draw (~22.5 ms, ~10 ms of which
+is pixel fill per the skip-fill split).
+
+Next levers: re-test computed-goto at the corrected Release baseline (its `-O0`
+regression premise — interpreter past I-cache — may have flipped now that
+`luaV_execute` is 5,548 B), and a faster graphics fill path.
+
+#### Computed-goto re-test at Release — still regresses, RETIRED
+
+Re-ran the threaded-dispatch A/B against the corrected Release + foreach baseline
+(`-DOPEN8_VM_GOTO=ON`, now a proper CMake option; host differential test
+re-confirmed switch≡goto byte-identical at current lvm.c):
+
+| dispatch | t_update (median) | t_draw | fps |
+|---|---:|---:|---:|
+| switch (baseline) | ~23 ms   | ~22.5 ms | ~20–21 |
+| computed-goto     | ~28.5 ms | ~22 ms   | ~18–19 |
+
+Still ~5 ms worse on update, ~2 fps down (the goto run also had fresh 60/250 ms
+spikes). The `-O2` premise flip (luaV_execute 8052→5548 B) did **not** rescue it.
+The `-O0` conclusion was directionally correct for the right reason: **dispatch
+isn't the bottleneck**, so threading is pure overhead, and the compiler's
+`switch`→jump-table beats a hand-rolled computed goto on Cortex-M7. Caveat: the
+two captures are different play sessions (object load varies), but the direction
+matches both the `-O0` result and the theory. **Retired for good**; flag stays
+OFF. The lvm.c code remains behind `OPEN8_VM_GOTO` purely to reproduce.
+
+Standing optimization picture (production = switch + foreach opt, ~20–21 fps,
+~47 ms frame): the ~14 ms gap to 30 fps splits ~23 ms update / ~22.5 ms draw.
+The graphics fill path (~10 ms of draw, per the skip-fill split) is the next
+bounded target; the residual VM/update cost is the genuinely memory-bound part.
 
 See [POSTMORTEM.md](POSTMORTEM.md) for the full retrospective.

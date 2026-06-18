@@ -8,6 +8,7 @@
  **/
 
 #include <SDL3/SDL.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <wchar.h>
@@ -21,6 +22,7 @@
 #include "core.h"
 #include "memory.h"
 #include "p8scii.h"
+#include "profile.h"
 
 #define TO_BE_DONE \
     static bool warning_printed = false; \
@@ -50,6 +52,22 @@ int open8_profile_skip_fill = 0;
 #define OPEN8_SKIP_FILL() do { if (open8_profile_skip_fill) return 0; } while (0)
 #else
 #define OPEN8_SKIP_FILL() ((void)0)
+#endif
+
+#ifdef OPEN8_PROFILE_API
+open8_api_profile open8_profile_api;
+
+void open8_profile_api_reset(void)
+{
+    open8_profile_api = (open8_api_profile){0};
+}
+
+#define OPEN8_PROFILE_INC(field) (++open8_profile_api.field)
+#define OPEN8_PROFILE_ADD(field, value) \
+    (open8_profile_api.field += (uint32_t)(value))
+#else
+#define OPEN8_PROFILE_INC(field) ((void)0)
+#define OPEN8_PROFILE_ADD(field, value) ((void)0)
 #endif
 
 // Input state: tracks how many consecutive frames each button has been held.
@@ -619,6 +637,9 @@ static int pico8_camera(lua_State* L)
 
 static int pico8_circ(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
+
     int cx = fix32_to_int(luaL_checknumber(L, 1));
     int cy = fix32_to_int(luaL_checknumber(L, 2));
 
@@ -642,6 +663,8 @@ static int pico8_circ(lua_State* L)
 
 static int pico8_circfill(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
     OPEN8_SKIP_FILL();
 
     int cx = fix32_to_int(luaL_checknumber(L, 1));
@@ -672,6 +695,8 @@ static int pico8_clip(lua_State* L)
 
 static int pico8_cls(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
     OPEN8_SKIP_FILL();
 
     int color = fix32_to_int32(luaL_optinteger(L, 1, 0));
@@ -796,6 +821,8 @@ static int pico8_fset(lua_State* L)
 
 static int pico8_line(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
     OPEN8_SKIP_FILL();
 
     int x0 = fix32_to_int(luaL_checknumber(L, 1));
@@ -821,6 +848,9 @@ static int pico8_line(lua_State* L)
 
 static int pico8_oval(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
+
     int x0 = fix32_to_int(luaL_checknumber(L, 1));
     int y0 = fix32_to_int(luaL_checknumber(L, 2));
     int x1 = fix32_to_int(luaL_checknumber(L, 3));
@@ -844,6 +874,9 @@ static int pico8_oval(lua_State* L)
 
 static int pico8_ovalfill(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
+
     int x0 = fix32_to_int(luaL_checknumber(L, 1));
     int y0 = fix32_to_int(luaL_checknumber(L, 2));
     int x1 = fix32_to_int(luaL_checknumber(L, 3));
@@ -987,6 +1020,9 @@ static int pico8_pget(lua_State* L)
 
 static int pico8_print(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(print_calls);
+
     const char* text = luaL_checkstring(L, 1);
     int argc = lua_gettop(L);
     uint8_t cursor_x = pico8_ram[0x5f26];
@@ -1053,6 +1089,8 @@ static int pico8_print(lua_State* L)
 
 static int pico8_pset(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
     OPEN8_SKIP_FILL();
 
     int x = (int)fix32_to_int32(luaL_checknumber(L, 1));
@@ -1075,6 +1113,9 @@ static int pico8_pset(lua_State* L)
 
 static int pico8_rect(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
+
     int x0 = fix32_to_int(luaL_checknumber(L, 1));
     int y0 = fix32_to_int(luaL_checknumber(L, 2));
     int x1 = fix32_to_int(luaL_checknumber(L, 3));
@@ -1098,6 +1139,8 @@ static int pico8_rect(lua_State* L)
 
 static int pico8_rectfill(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(primitive_calls);
     OPEN8_SKIP_FILL();
 
     int x0 = fix32_to_int(luaL_checknumber(L, 1));
@@ -1197,6 +1240,8 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
 
 static int pico8_spr(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(spr_calls);
     OPEN8_SKIP_FILL();
 
     /* Be defensive: some carts may attempt to call spr(nil) when an object's
@@ -1229,6 +1274,8 @@ static int pico8_sset(lua_State* L)
 
 static int pico8_sspr(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(sspr_calls);
     OPEN8_SKIP_FILL();
 
     int sx = fix32_to_int(luaL_checknumber(L, 1));
@@ -1346,6 +1393,8 @@ static void map_set(int col, int row, uint8_t sprite)
 
 static int pico8_map(lua_State* L)
 {
+    OPEN8_PROFILE_INC(draw_calls);
+    OPEN8_PROFILE_INC(map_calls);
     OPEN8_SKIP_FILL();
 
     int celx = fix32_to_int(luaL_optnumber(L, 1, 0));
@@ -1355,6 +1404,11 @@ static int pico8_map(lua_State* L)
     int celw = fix32_to_int(luaL_optnumber(L, 5, fix32_value(128, 0)));
     int celh = fix32_to_int(luaL_optnumber(L, 6, fix32_value(64, 0)));
     uint8_t layer = 0;
+
+    if (celw > 0 && celh > 0)
+    {
+        OPEN8_PROFILE_ADD(map_cells, (uint32_t)celw * (uint32_t)celh);
+    }
 
     apply_camera_offset((int*)&sx, (int*)&sy);
 
@@ -2001,6 +2055,8 @@ static int pico8_run(lua_State* L)
 
 static int pico8_add(lua_State* L)
 {
+    OPEN8_PROFILE_INC(add_calls);
+
     luaL_checktype(L, 1, LUA_TTABLE);
     luaL_checkany(L, 2);
 
@@ -2049,6 +2105,8 @@ static int pico8_all_iter(lua_State* L)
 
 static int pico8_all(lua_State* L)
 {
+    OPEN8_PROFILE_INC(all_calls);
+
     luaL_checktype(L, 1, LUA_TTABLE);
 
     /* Make a compact snapshot copy of the array portion of the table.
@@ -2073,6 +2131,7 @@ static int pico8_all(lua_State* L)
             lua_pop(L, 1);
         }
     }
+    OPEN8_PROFILE_ADD(all_items, dest);
 
     /* Cache the snapshot length too, avoiding lua_rawlen() on every iteration. */
     lua_pushvalue(L, copy_index); /* push copy */
@@ -2096,6 +2155,8 @@ static int pico8_count(lua_State* L)
 
 static int pico8_del(lua_State* L)
 {
+    OPEN8_PROFILE_INC(del_calls);
+
     luaL_checktype(L, 1, LUA_TTABLE);
     luaL_checkany(L, 2);
 
@@ -2106,6 +2167,8 @@ static int pico8_del(lua_State* L)
         lua_rawgeti(L, 1, i); /* push tbl[i] */
         if (lua_rawequal(L, -1, 2))
         {
+            OPEN8_PROFILE_ADD(del_shifts, len - i);
+
             /* Shift tbl[i+1..len] down by one. */
             for (int j = i; j < len; j++)
             {
@@ -2129,51 +2192,47 @@ static int pico8_del(lua_State* L)
 
 static int pico8_foreach(lua_State* L)
 {
+    OPEN8_PROFILE_INC(foreach_calls);
+
     luaL_checktype(L, 1, LUA_TTABLE);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
-    /* Make a compact snapshot copy of the array portion of the table so
-     * that mutations (add/del) performed by the callback do not affect the
-     * iteration order or cause duplicate/skip behaviour. This matches PICO-8
-     * semantics and mirrors the approach used by pico8_all(). */
+    /* Snapshot values directly on this C call's Lua stack. foreach() runs its
+     * callbacks synchronously, so the stack is a GC root for the complete
+     * operation. This preserves mutation-safe PICO-8 semantics without
+     * allocating, filling, and reading a temporary Lua table every call. */
     size_t len = lua_rawlen(L, 1);
-    lua_newtable(L); /* copy */
-    int copy_index = lua_gettop(L);
+    if (len > (size_t)(INT_MAX - LUA_MINSTACK))
+    {
+        return luaL_error(L, "table too large for foreach");
+    }
 
+    luaL_checkstack(L, (int)len + LUA_MINSTACK, "table too large for foreach");
+    int snapshot_base = lua_gettop(L) + 1;
     size_t dest = 0;
+
     for (size_t i = 1; i <= len; i++)
     {
-        lua_rawgeti(L, 1, (int)i); /* push original[i] */
+        lua_rawgeti(L, 1, (int)i);
         if (!lua_isnil(L, -1))
         {
             dest++;
-            lua_rawseti(L, copy_index, (int)dest); /* copy[dest] = value, pops value */
         }
         else
         {
             lua_pop(L, 1);
         }
     }
+    OPEN8_PROFILE_ADD(foreach_items, dest);
 
-    int copy_len = (int)lua_rawlen(L, copy_index);
-    for (int i = 1; i <= copy_len; i++)
+    for (size_t i = 0; i < dest; i++)
     {
-        lua_pushvalue(L, 2);      /* fn */
-        lua_rawgeti(L, copy_index, i); /* item */
-        /* item should never be nil in our dense copy, but check defensively */
-        if (lua_isnil(L, -1))
-        {
-            lua_pop(L, 2);
-        }
-        else
-        {
-            lua_call(L, 1, 0);
-        }
+        lua_pushvalue(L, 2);
+        lua_pushvalue(L, snapshot_base + (int)i);
+        lua_call(L, 1, 0);
     }
 
-    /* remove the temporary copy table */
-    lua_pop(L, 1);
-
+    lua_settop(L, snapshot_base - 1);
     return 0;
 }
 

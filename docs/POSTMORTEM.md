@@ -109,9 +109,25 @@ numbers remain historical observations, not reliable architectural conclusions.
 In particular, the prior claim that cart-defined D-cache misses formed an
 unmovable wall is retracted.
 
+## Corrected Release fill split
+
+The manual Celeste capture produced these medians after excluding transition
+and obvious outlier frames:
+
+| mode | update | draw | blit | summed frame |
+|---|---:|---:|---:|---:|
+| full (first) | 25.7 ms | 28.0 ms | 1.17 ms | 54.4 ms |
+| no-fill | 21.4 ms | **18.3 ms** | 1.27 ms | **42.0 ms** |
+| full (restored) | 27.5 ms | 29.3 ms | 1.17 ms | 57.9 ms |
+
+Skipping the C pixel work improves gameplay from roughly 16–19 fps to 21–23
+fps and saves about 10–11 ms in draw. That is a large graphics opportunity, but
+even perfect fill removal remains about 8.7 ms over the 30 fps frame budget.
+The remaining plan must target graphics and VM/API work together.
+
 ## Next step
 
-Re-run only the coarse fill split against Release:
+Run the coarse API counter build against Release:
 
 ```sh
 cmake -S platform/playdate -B platform/playdate/build-profile \
@@ -119,20 +135,30 @@ cmake -S platform/playdate -B platform/playdate/build-profile \
   -DCMAKE_TOOLCHAIN_FILE="$PLAYDATE_SDK_PATH/C_API/buildsupport/arm.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
   -DOPEN8_PROFILE_TOOLS=ON \
+  -DOPEN8_PROFILE_API=ON \
   -DOPEN8_PROFILE_LOAD=OFF \
   -DOPEN8_ARENA_ALLOCATOR=OFF
 cmake --build platform/playdate/build-profile
 ```
 
-Measure full and no-fill frames for all four carts:
+The supplied no-fill capture showed zero `all()` calls. Celeste instead uses
+`foreach()`: a normal draw makes six calls and snapshots a median 56.5 items.
+Three 332–358 ms update spikes each coincided with 258 calls and about 3,077
+items copied. The next A/B experiment should therefore replace `foreach()`'s
+temporary Lua table with a cheaper mutation-safe snapshot representation.
+Graphics remains the parallel target: a normal draw makes about 52 primitive
+calls, 5–13 `spr` calls, and three `map` calls.
 
-- If Celeste's no-fill total is at or below 33 ms, graphics is the path to 30
-  fps: optimize `map()`/`spr()` and packed framebuffer writes.
-- If no-fill remains well above budget, add coarse timers/counters around API
-  categories such as table iteration, math, input and drawing. Avoid per-opcode
-  writes while collecting timing.
-- `all()` is the first API-level suspect because Celeste repeatedly iterates
-  object lists and the current mutation-safe semantics still require a snapshot.
+That A/B candidate now stores the synchronous `foreach()` snapshot directly on
+the Lua C-call stack. It remains GC-rooted and mutation-safe, but avoids a
+temporary table allocation and its indexed write/read traffic. Device impact is
+not claimed until the tester supplies the optimized capture.
+
+Device serial output is supplied manually by the tester and must not be read
+from the development host.
+
+Deployment stops after copying the `.pdx` to the Playdate. Never invoke
+`pdutil run` or launch the game automatically; the tester launches it manually.
 
 Only after this corrected split should computed-goto, GC behavior, or allocator
 placement be reconsidered.

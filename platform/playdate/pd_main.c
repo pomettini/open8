@@ -19,6 +19,7 @@
 #include "memory.h"      /* pico8_ram */
 #include "auxiliary.h"   /* color_lookup */
 #include "audio.h"       /* audio_render */
+#include "profile.h"     /* opt-in coarse API counters */
 #include "pdshim.h"
 
 /* Declared in api.c / lvm.c. Not via their headers: those pull z8lua's lua.h,
@@ -208,13 +209,24 @@ static int update(void* userdata)
 #ifdef OPEN8_PROFILE_LOAD
     uint32_t ui = 0, uc = 0, di = 0, dc = 0; /* per-phase load counts */
 #endif
+#ifdef OPEN8_PROFILE_API
+    open8_api_profile api_update = {0};
+    open8_api_profile api_draw = {0};
+#endif
 
     uint32_t t0 = pd_shim_ticks();
     poll_input();
 #ifdef OPEN8_PROFILE_LOAD
     open8_vm_instr_count = 0; open8_vm_ccall_count = 0;
 #endif
+#ifdef OPEN8_PROFILE_API
+    open8_profile_api_reset();
+#endif
     core_pd_update();
+#ifdef OPEN8_PROFILE_API
+    api_update = open8_profile_api;
+    open8_profile_api_reset();
+#endif
 #ifdef OPEN8_PROFILE_LOAD
     ui = open8_vm_instr_count; uc = open8_vm_ccall_count;
     open8_vm_instr_count = 0; open8_vm_ccall_count = 0;
@@ -222,6 +234,9 @@ static int update(void* userdata)
     if (g_log_first) pd->system->logToConsole("open8: frame1 update ok");
     uint32_t t1 = pd_shim_ticks();
     core_pd_draw();
+#ifdef OPEN8_PROFILE_API
+    api_draw = open8_profile_api;
+#endif
 #ifdef OPEN8_PROFILE_LOAD
     di = open8_vm_instr_count; dc = open8_vm_ccall_count;
 #endif
@@ -284,6 +299,40 @@ static int update(void* userdata)
                                  (unsigned long)us_update,
                                  (unsigned long)us_draw,
                                  (unsigned long)us_blit);
+#endif
+#ifdef OPEN8_PROFILE_API
+        pd->system->logToConsole(
+            "api_u tbl[all=%lu items=%lu add=%lu del=%lu shifts=%lu foreach=%lu items=%lu] gfx[all=%lu prim=%lu print=%lu spr=%lu sspr=%lu map=%lu cells=%lu]",
+            (unsigned long)api_update.all_calls,
+            (unsigned long)api_update.all_items,
+            (unsigned long)api_update.add_calls,
+            (unsigned long)api_update.del_calls,
+            (unsigned long)api_update.del_shifts,
+            (unsigned long)api_update.foreach_calls,
+            (unsigned long)api_update.foreach_items,
+            (unsigned long)api_update.draw_calls,
+            (unsigned long)api_update.primitive_calls,
+            (unsigned long)api_update.print_calls,
+            (unsigned long)api_update.spr_calls,
+            (unsigned long)api_update.sspr_calls,
+            (unsigned long)api_update.map_calls,
+            (unsigned long)api_update.map_cells);
+        pd->system->logToConsole(
+            "api_d tbl[all=%lu items=%lu add=%lu del=%lu shifts=%lu foreach=%lu items=%lu] gfx[all=%lu prim=%lu print=%lu spr=%lu sspr=%lu map=%lu cells=%lu]",
+            (unsigned long)api_draw.all_calls,
+            (unsigned long)api_draw.all_items,
+            (unsigned long)api_draw.add_calls,
+            (unsigned long)api_draw.del_calls,
+            (unsigned long)api_draw.del_shifts,
+            (unsigned long)api_draw.foreach_calls,
+            (unsigned long)api_draw.foreach_items,
+            (unsigned long)api_draw.draw_calls,
+            (unsigned long)api_draw.primitive_calls,
+            (unsigned long)api_draw.print_calls,
+            (unsigned long)api_draw.spr_calls,
+            (unsigned long)api_draw.sspr_calls,
+            (unsigned long)api_draw.map_calls,
+            (unsigned long)api_draw.map_cells);
 #endif
     }
 

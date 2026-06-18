@@ -489,6 +489,27 @@ function test_tables()
     foreach(tbl, foreach_test)
     assert_equal(tmp, 0, "foreach(tbl, foreach_test)")
 
+    -- foreach() snapshots its input before invoking callbacks. Mutating the
+    -- source table must not change the values visited by the current call.
+    tbl = {1, 2, 3, 4}
+    local foreach_result = {}
+    function foreach_mutation_test(v)
+        add(foreach_result, v)
+        if v == 2 then
+            del(tbl, 2)
+            add(tbl, 5)
+        end
+    end
+    foreach(tbl, foreach_mutation_test)
+    assert_equal(#foreach_result, 4, "foreach mutation: original length")
+    for i = 1, 4 do
+        assert_equal(foreach_result[i], i, "foreach mutation: value " .. i)
+    end
+    assert_equal(tbl[1], 1, "foreach mutation: source value 1")
+    assert_equal(tbl[2], 3, "foreach mutation: source value 2")
+    assert_equal(tbl[3], 4, "foreach mutation: source value 3")
+    assert_equal(tbl[4], 5, "foreach mutation: source value 4")
+
     tbl = {}
     tbl = { 1, 2, 3, 4, nil, 5, 6, 7, 8, 9, 10 }
     local result = {}
