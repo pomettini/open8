@@ -2,7 +2,7 @@
  *
  *  Playdate backend entry point for open8.
  *
- *  Boots embedded test carts, runs the z8lua VM, threshold-blits the PICO-8
+ *  Boots embedded test carts, runs the z8lua VM, scales and dithers the PICO-8
  *  framebuffer to the 1-bit display, and reports update/draw/blit timing.
  *  Expensive probes are separately gated by OPEN8_PROFILE_LOAD and
  *  OPEN8_PROFILE_TOOLS so production builds do not pay their overhead.
@@ -78,11 +78,18 @@ static LCDFont*     g_font = NULL;
 static int          g_booted = 0;
 
 /* dither[final colour 0..15][bayer cell 0..15] -> 1-bit pixel. Built from the 16
- * fixed PICO-8 colour luminances and keyed by the post-display-palette colour,
- * so it stays correct under pal(). Nearest-neighbour scale tables map dest->src. */
+ * fixed PICO-8 colour luminances and keyed by the post-display-palette colour.
+ *
+ * Horizontal scaling is exactly 8 source pixels -> 15 destination pixels.
+ * expand[y phase][group phase][packed source byte] maps two source pixels to
+ * four destination bits. Four reads form a 15-bit group (the last low bit is
+ * discarded). The compact 4 KiB table is rebuilt only when the 16-byte display
+ * palette changes, preserving pal() without the failed 32 KiB LUT's cache cost. */
 static uint8_t g_dither[16][16];
-static uint8_t g_sx[SCALE_W];
 static uint8_t g_sy[SCALE_H];
+static uint8_t g_expand[4][4][256];
+static uint8_t g_cached_disp[16];
+static int g_expand_valid = 0;
 
 static void build_display_tables(void)
 {
@@ -105,36 +112,73 @@ static void build_display_tables(void)
             g_dither[c][k] = (lum > threshold) ? 1 : 0;
         }
     }
-    for (int d = 0; d < SCALE_W; d++) g_sx[d] = (uint8_t)(d * SRC_W / SCALE_W);
     for (int d = 0; d < SCALE_H; d++) g_sy[d] = (uint8_t)(d * SRC_H / SCALE_H);
+}
+
+static void refresh_expand_lut(const uint8_t* disp)
+{
+    if (g_expand_valid && memcmp(g_cached_disp, disp, sizeof(g_cached_disp)) == 0)
+        return;
+
+    memcpy(g_cached_disp, disp, sizeof(g_cached_disp));
+    for (int by = 0; by < 4; by++)
+    {
+        for (int group_phase = 0; group_phase < 4; group_phase++)
+        {
+            /* Each group starts 15 pixels later, so its Bayer X phase retreats
+             * by one modulo four: 0, 3, 2, 1. */
+            int x0 = (group_phase * 15) & 3;
+            for (int packed = 0; packed < 256; packed++)
+            {
+                uint8_t contribution = 0;
+                for (int p = 0; p < 4; p++)
+                {
+                    uint8_t nib = (uint8_t)((packed >> ((p >> 1) * 4)) & 0x0F);
+                    uint8_t col = disp[nib] & 0x0F;
+                    uint8_t bit = g_dither[col][(by << 2) + ((x0 + p) & 3)];
+                    contribution |= (uint8_t)(bit << (3 - p));
+                }
+                g_expand[by][group_phase][packed] = contribution;
+            }
+        }
+    }
+    g_expand_valid = 1;
 }
 
 static void blit_framebuffer(void)
 {
     uint8_t* frame = g_pd->graphics->getFrame();
     const uint8_t* disp = &pico8_ram[DISP_PALETTE];
+    refresh_expand_lut(disp);
 
     for (int dy = 0; dy < SCALE_H; dy++)
     {
         const uint8_t* src  = &pico8_ram[FB_BASE + ((uint16_t)g_sy[dy] << 6)];
         uint8_t*       drow = frame + (DEST_Y + dy) * LCD_ROWSIZE + DEST_BYTE_X;
-        int            bayer_row = (dy & 3) << 2;
+        int            by = dy & 3;
+        uint32_t       accumulator = 0;
+        int            accumulated = 0;
 
-        for (int bx = 0; bx < DEST_BYTES; bx++)
+        for (int group = 0; group < SRC_W / 8; group++)
         {
-            uint8_t out = 0;
-            int dx0 = bx << 3;
-            for (int k = 0; k < 8; k++)
+            const uint8_t* s = src + group * 4;
+            const uint8_t* lut = g_expand[by][group & 3];
+            uint32_t bits =
+                ((uint32_t)lut[s[0]] << 11) |
+                ((uint32_t)lut[s[1]] << 7) |
+                ((uint32_t)lut[s[2]] << 3) |
+                ((uint32_t)lut[s[3]] >> 1);
+
+            accumulator = (accumulator << 15) | bits;
+            accumulated += 15;
+            while (accumulated >= 8)
             {
-                int     dx  = dx0 + k;
-                uint8_t sx  = g_sx[dx];
-                uint8_t s   = src[sx >> 1];
-                uint8_t nib = (sx & 1) ? (s >> 4) : (s & 0x0F);
-                uint8_t col = disp[nib] & 0x0F;                 /* post-display-palette colour */
-                uint8_t bit = g_dither[col][bayer_row + (dx & 3)];
-                out |= (uint8_t)(bit << (7 - k));
+                accumulated -= 8;
+                *drow++ = (uint8_t)(accumulator >> accumulated);
             }
-            drow[bx] = out;
+            accumulator = accumulated
+                ? accumulator & ((1u << accumulated) - 1u)
+                : 0;
         }
     }
 
@@ -279,23 +323,25 @@ static int update(void* userdata)
     skip = open8_profile_skip_fill;
 #endif
 
-    /* HUD in the left border (cols 0..135, clear of the 128x128 region). */
+    /* Compact HUD in the 80 px left border, clear of the 240x240 game region. */
     if (g_font)
     {
         char line[64];
         pd->graphics->setFont(g_font);
         int n;
-        n = snprintf(line, sizeof(line), "%s%s%s", g_carts[g_cart_index].name,
-                     skip ? " [nofill]" : "", g_gc_off ? " [gc-off]" : "");
+        n = snprintf(line, sizeof(line), "%s", g_carts[g_cart_index].name);
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 4);
-        n = snprintf(line, sizeof(line), "fps %2d", (int)(fps + 0.5f));
+        n = snprintf(line, sizeof(line), "%s%s",
+                     skip ? "NF" : "", g_gc_off ? (skip ? " GC" : "GC") : "");
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 24);
-        n = snprintf(line, sizeof(line), "upd %lu", (unsigned long)us_update);
+        n = snprintf(line, sizeof(line), "f %2d", (int)(fps + 0.5f));
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 44);
-        n = snprintf(line, sizeof(line), "drw %lu", (unsigned long)us_draw);
+        n = snprintf(line, sizeof(line), "u %lu", (unsigned long)us_update);
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 64);
-        n = snprintf(line, sizeof(line), "blt %lu", (unsigned long)us_blit);
+        n = snprintf(line, sizeof(line), "d %lu", (unsigned long)us_draw);
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 84);
+        n = snprintf(line, sizeof(line), "b %lu", (unsigned long)us_blit);
+        pd->graphics->drawText(line, n, kASCIIEncoding, 4, 104);
     }
 
     /* Serial trace once per second. */
@@ -314,8 +360,9 @@ static int update(void* userdata)
                                  (unsigned long)ui, (unsigned long)uc,
                                  (unsigned long)di, (unsigned long)dc);
 #else
-        pd->system->logToConsole("cart=%s  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus",
+        pd->system->logToConsole("cart=%s nofill=%d gcoff=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus",
                                  g_carts[g_cart_index].name,
+                                 skip, g_gc_off,
                                  (int)(fps + 0.5f),
                                  (unsigned long)us_update,
                                  (unsigned long)us_draw,
@@ -375,7 +422,7 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
         pd->system->logToConsole("open8: [1] init, shim ready");
 
         build_display_tables();
-        pd->system->logToConsole("open8: [2] display tables built (200x200 + dither)");
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4)");
 
         const char* err = NULL;
         g_font = pd->graphics->loadFont("/System/Fonts/Asheville-Sans-14-Bold.pft", &err);
