@@ -17,6 +17,7 @@
 #include "z8lua/fix32.h"
 #include "auxiliary.h"
 #include "app.h"
+#include "audio.h"
 #include "core.h"
 #include "memory.h"
 #include "p8scii.h"
@@ -422,29 +423,71 @@ static void draw_rect(int x0, int y0, int x1, int y1, int* color, bool fill)
 
 static int pico8_music(lua_State* L)
 {
-    TO_BE_DONE;
+    int n    = fix32_to_int(luaL_optnumber(L, 1, fix32_from_int(-1)));
+    int fade = fix32_to_int(luaL_optnumber(L, 2, fix32_from_int(0)));
+    int mask = fix32_to_int(luaL_optnumber(L, 3, fix32_from_int(0)));
+    audio_music(n, fade, mask);
+    return 0;
 }
 
 static int pico8_sfx(lua_State* L)
 {
-    TO_BE_DONE;
+    int n       = fix32_to_int(luaL_checknumber(L, 1));
+    int channel = fix32_to_int(luaL_optnumber(L, 2, fix32_from_int(-1)));
+    int offset  = fix32_to_int(luaL_optnumber(L, 3, fix32_from_int(0)));
+    int length  = fix32_to_int(luaL_optnumber(L, 4, fix32_from_int(0)));
+    audio_sfx(n, channel, offset, length);
+    return 0;
 }
 
 // Cart data functions.
+//
+// PICO-8 persistent cart data is 64 fixed-point values at 0x5e00-0x5eff. We keep
+// it in RAM (zeroed at boot); on-disk persistence keyed by the cartdata() id is
+// not implemented. This is enough for carts that read defaults via dget (e.g.
+// racer, which previously crashed because the stub returned nil).
+
+#define CARTDATA_ADDR 0x5e00
+#define CARTDATA_SLOTS 64
 
 static int pico8_cartdata(lua_State* L)
 {
-    TO_BE_DONE;
+    (void)L; // The save id is accepted but unused (no disk persistence yet).
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 static int pico8_dget(lua_State* L)
 {
-    TO_BE_DONE;
+    int index = fix32_to_int(luaL_checknumber(L, 1));
+    if (index < 0 || index >= CARTDATA_SLOTS)
+    {
+        lua_pushnumber(L, fix32_from_int(0));
+        return 1;
+    }
+    uint16_t addr = (uint16_t)(CARTDATA_ADDR + index * 4);
+    uint32_t raw = (uint32_t)pico8_ram[addr]
+                 | ((uint32_t)pico8_ram[addr + 1] << 8)
+                 | ((uint32_t)pico8_ram[addr + 2] << 16)
+                 | ((uint32_t)pico8_ram[addr + 3] << 24);
+    lua_pushnumber(L, (lua_Number)(fix32_t)raw); // stored bits are already a fix32
+    return 1;
 }
 
 static int pico8_dset(lua_State* L)
 {
-    TO_BE_DONE;
+    int index = fix32_to_int(luaL_checknumber(L, 1));
+    if (index < 0 || index >= CARTDATA_SLOTS)
+    {
+        return 0;
+    }
+    uint32_t raw = (uint32_t)(fix32_t)luaL_checknumber(L, 2);
+    uint16_t addr = (uint16_t)(CARTDATA_ADDR + index * 4);
+    pico8_ram[addr]     = (uint8_t)(raw & 0xff);
+    pico8_ram[addr + 1] = (uint8_t)((raw >> 8) & 0xff);
+    pico8_ram[addr + 2] = (uint8_t)((raw >> 16) & 0xff);
+    pico8_ram[addr + 3] = (uint8_t)((raw >> 24) & 0xff);
+    return 0;
 }
 
 // Debugging functions.

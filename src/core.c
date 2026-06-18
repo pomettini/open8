@@ -17,6 +17,7 @@
 #include "z8lua/lualib.h"
 #include "api.h"
 #include "app.h"
+#include "audio.h"
 #include "core.h"
 #include "memory.h"
 
@@ -637,6 +638,7 @@ static bool run_cartridge(SDL_Renderer* renderer)
     }
 
     reset_memory();
+    audio_reset();
 
     // Copy spritesheet, map, flags, music and sound effects data to memory.
     // 0x0000-0x42ff

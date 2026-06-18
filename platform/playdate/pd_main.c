@@ -21,6 +21,7 @@
 #include "core.h"        /* core_pd_init / core_pd_boot_cart / core_pd_update / core_pd_draw */
 #include "memory.h"      /* pico8_ram */
 #include "auxiliary.h"   /* color_lookup */
+#include "audio.h"       /* audio_render */
 #include "pdshim.h"
 
 /* Declared in api.c / lvm.c. Not via their headers: those pull z8lua's lua.h,
@@ -117,6 +118,13 @@ static void blit_framebuffer(void)
     }
 
     g_pd->graphics->markUpdatedRows(DEST_Y, DEST_Y + SCREEN_H - 1);
+}
+
+/* Playdate sound source: mono synth -> left buffer. Runs on the audio thread. */
+static int audio_cb(void* ctx, int16_t* left, int16_t* right, int len)
+{
+    (void)ctx; (void)right;
+    return audio_render(left, len);
 }
 
 static void poll_input(void)
@@ -316,6 +324,9 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
         PDMenuItem* gc_item =
             pd->system->addCheckmarkMenuItem("gc off", 0, gc_menu_cb, NULL);
         pd->system->setMenuItemUserdata(gc_item, gc_item);
+
+        /* PICO-8 audio: a mono sound source pulling from the synth. */
+        pd->sound->addSource(audio_cb, NULL, 0);
 
         pd->display->setRefreshRate(30.0f);
         pd->system->setUpdateCallback(update, pd);

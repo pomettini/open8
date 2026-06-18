@@ -23,6 +23,7 @@ set(open8_sources
   src/api.c
   src/app.c
   src/auxiliary.c
+  src/audio.c
   src/core.c
   src/memory.c
   src/p8scii.c

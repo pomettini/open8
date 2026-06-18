@@ -47,6 +47,7 @@ set(OPEN8_SOURCES
 	${OPEN8_SRC}/core.c
 	${OPEN8_SRC}/memory.c
 	${OPEN8_SRC}/auxiliary.c
+	${OPEN8_SRC}/audio.c
 	${OPEN8_SRC}/p8scii.c
 	${OPEN8_SRC}/lexaloffle/p8_compress.c
 	${OPEN8_SRC}/lexaloffle/pxa_compress_snippets.c

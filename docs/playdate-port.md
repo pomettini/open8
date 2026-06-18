@@ -447,3 +447,23 @@ cart-defined access pattern.** Performance envelope: light carts 30 fps; complex
 carts (celeste, jelpi) ~6–13 fps. Display path done; measurement harness is the
 durable asset. Recommended pivot: correctness/completeness (fix racer's
 dget/cartdata, implement audio) over further perf chasing.
+
+### 2026-06-18 — Wrap-up: correctness + audio
+
+- **Racer fixed.** `cartdata`/`dget`/`dset` implemented in-memory over the
+  persistent-data region (0x5e00, 64 fixed-point slots). `dget` now returns 0
+  for unset slots instead of nil, so the `_draw:1608 arithmetic on nil` crash is
+  gone and the per-frame error spam with it. On-disk persistence keyed by the
+  cartdata id is not implemented (RAM only).
+- **Audio implemented** (`src/audio.c`, platform-independent): PICO-8 synth —
+  4 channels, the standard waveforms, pitch/volume, per-SFX speed + internal
+  loop, and basic music pattern sequencing. `sfx()`/`music()` in api.c drive it;
+  `audio_reset()` runs on cart load. Output: a Playdate `addSource` mono callback
+  pulls `audio_render()` at 44.1 kHz. Compiled into both the Playdate and SDL
+  builds (SDL output not yet wired — synth runs, device stays silent as before).
+  Scope is a working core: tilted-saw/organ/phaser instruments and the
+  slide/vibrato/arp note effects are approximated/stubbed, and tempo/mix
+  constants may want on-device tuning. The game/audio-thread share of pico8_ram +
+  channel state is an accepted minor race for now.
+
+See [POSTMORTEM.md](POSTMORTEM.md) for the full retrospective.
