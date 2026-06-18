@@ -393,3 +393,57 @@ exhausted; remaining options are deep and uncertain:
    relocate a 50–114 KB heap; MPU/cacheability not game-controllable).
 
 `t_blit` stayed ~3.7 ms flat across every experiment — the display path is done.
+
+### 2026-06-18 — Phase 2 experiment #4: arena allocator — NULL result
+
+`OPEN8_ARENA_ALLOC` (arena_alloc.c): small Lua objects served from one
+contiguous region via size-classed free lists (same-size objects cluster, reused
+slots stay warm); large blocks (stack/big arrays) fall through to system malloc.
+Host-validated byte-identical to the stock allocator through 40 rounds of table
+churn + full GCs.
+
+| cart | stock t_update | arena t_update |
+|---|---|---|
+| celeste | ~27.4 ms | ~26.9 ms (≈ noise) |
+| jelpi   | ~149–155 ms | ~152–156 ms (no change) |
+
+Object *placement* is not the lever. The misses are inherent to the *access
+pattern* — the cart's own pointer-chasing over tables/objects — which an
+allocator can't change. Instruction/C-call counts identical (the allocator
+doesn't change what runs). **Memory levers now exhausted:** dispatch (regressed),
+bytecode (cheap), GC (no effect), footprint (packing → predicted Cortex-M
+regression), placement (this, null). The wall is the cart's data working set
+(51–114 KB) ≫ 16 KB D-cache, in external RAM, accessed by cart-defined pointer
+chasing — unchangeable from our side.
+
+### Q: use the Playdate's built-in Lua interpreter instead of z8lua?
+
+Asked, and worth recording. **No — blocked three ways, and it wouldn't help:**
+
+1. **No runtime source loading.** `pd->lua` exposes only `addFunction`,
+   `registerClass`, `callFunction` (by name), and arg marshalling — **no
+   `loadstring`/`dostring`/`loadbuffer`**. Playdate Lua is precompiled by pdc to
+   `.pdz`; there's no path to compile arbitrary Lua text at runtime from C. PICO-8
+   carts arrive as Lua *source* that must be compiled at runtime.
+2. **Wrong semantics + syntax.** PICO-8 is 16.16 fixed-point with specific
+   overflow/wrap, plus custom syntax (`\`, `+=`, `?`, `!=`, fixed-point literals,
+   `& | ^^ << >> >>> <<> >><`, `@ % $` peek ops). z8lua is a *fork* with a custom
+   lexer/parser and a fixed-point number type precisely for this. Stock Lua 5.4
+   (double/int) would fail to parse most carts and miscompute the rest.
+3. **It targets the wrong layer.** The bottleneck is D-cache misses on the cart's
+   *data*, which lives in the same external RAM with the same access pattern no
+   matter which interpreter runs it. "Already in memory" concerns interpreter
+   *code* — and the load characterizer proved interpreter code/dispatch is the
+   cheap part. A faster/resident interpreter optimises what's already fast.
+
+Even build-time transpilation (PICO-8 → native Lua `.pdz`, dodging #1) still hits
+#2 (fixed-point) and #3 (same data wall). Not a path.
+
+### Phase 2 verdict
+
+The non-obvious bottleneck called out on day one is confirmed and proven
+unchangeable from software: **cart data working set ≫ D-cache, external RAM,
+cart-defined access pattern.** Performance envelope: light carts 30 fps; complex
+carts (celeste, jelpi) ~6–13 fps. Display path done; measurement harness is the
+durable asset. Recommended pivot: correctness/completeness (fix racer's
+dget/cartdata, implement audio) over further perf chasing.
