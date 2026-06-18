@@ -21,13 +21,6 @@ static volatile uint32_t g_buttons = 0;
 void pd_shim_init(PlaydateAPI* p)
 {
     pd = p;
-
-#if defined(TARGET_PLAYDATE)
-    /* Enable the DWT cycle counter (raw register access, no CMSIS dependency). */
-    *(volatile uint32_t*)0xE000EDFC |= (1u << 24); /* CoreDebug DEMCR.TRCENA */
-    *(volatile uint32_t*)0xE0001004  = 0;          /* DWT CYCCNT = 0          */
-    *(volatile uint32_t*)0xE0001000 |= 1u;         /* DWT CTRL.CYCCNTENA      */
-#endif
 }
 
 void pd_shim_set_buttons(uint32_t mask)
@@ -37,21 +30,16 @@ void pd_shim_set_buttons(uint32_t mask)
 
 uint32_t pd_shim_ticks(void)
 {
-#if defined(TARGET_PLAYDATE)
-    return *(volatile uint32_t*)0xE0001004; /* DWT->CYCCNT */
-#else
-    /* Simulator: microseconds (DWT is device-only). */
+    /* Microseconds on both device and simulator. getElapsedTime() is a
+     * high-resolution monotonic timer that works identically on each, which
+     * keeps milestone 1 free of device-only register access. A cycle-accurate
+     * DWT counter is a later, separately-verified profiling refinement. */
     return pd ? (uint32_t)(pd->system->getElapsedTime() * 1000000.0f) : 0;
-#endif
 }
 
 int pd_shim_ticks_are_cycles(void)
 {
-#if defined(TARGET_PLAYDATE)
-    return 1;
-#else
-    return 0;
-#endif
+    return 0; /* always microseconds for now */
 }
 
 /* ---- logging / errors / strings --------------------------------------- */

@@ -62,7 +62,8 @@ set(OPEN8_SOURCES
 	${OPEN8_SRC}/z8lua/lzio.c)
 
 if (TOOLCHAIN STREQUAL "armgcc")
-	add_executable(${PLAYDATE_GAME_DEVICE} ${OPEN8_SOURCES})
+	# Device build needs newlib syscall stubs (carts are embedded; no POSIX FS).
+	add_executable(${PLAYDATE_GAME_DEVICE} ${OPEN8_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/shim/pd_syscalls.c)
 	set(OPEN8_TARGET ${PLAYDATE_GAME_DEVICE})
 else()
 	add_library(${PLAYDATE_GAME_NAME} SHARED ${OPEN8_SOURCES})

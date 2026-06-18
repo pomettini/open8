@@ -120,15 +120,21 @@ static int update(void* userdata)
         return 1;
     }
 
+    static int first = 1;
+    if (first) pd->system->logToConsole("open8: frame1 begin");
+
     uint32_t t0 = pd_shim_ticks();
     poll_input();
     core_pd_update();
+    if (first) pd->system->logToConsole("open8: frame1 update ok");
     uint32_t t1 = pd_shim_ticks();
     core_pd_draw();
+    if (first) pd->system->logToConsole("open8: frame1 draw ok");
     uint32_t t2 = pd_shim_ticks();
 
     pd->graphics->clear(kColorBlack);
     blit_framebuffer();
+    if (first) { pd->system->logToConsole("open8: frame1 blit ok"); first = 0; }
     uint32_t t3 = pd_shim_ticks();
 
     uint32_t us_update = to_us(t1 - t0);
@@ -179,31 +185,37 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
     {
         g_pd = pd;
         pd_shim_init(pd);
+        pd->system->logToConsole("open8: [1] init, shim ready");
+
         build_threshold_lut();
+        pd->system->logToConsole("open8: [2] threshold lut built");
 
         const char* err = NULL;
         g_font = pd->graphics->loadFont("/System/Fonts/Asheville-Sans-14-Bold.pft", &err);
-        if (!g_font)
-        {
-            pd->system->logToConsole("open8: could not load HUD font: %s", err ? err : "(null)");
-        }
+        pd->system->logToConsole("open8: [3] font = %p (%s)", (void*)g_font, err ? err : "ok");
 
+        pd->system->logToConsole("open8: [4] core_pd_init...");
         if (!core_pd_init())
         {
-            pd->system->logToConsole("open8: core_pd_init() failed");
-        }
-        else if (!core_pd_boot_cart(celeste_cart, (long)celeste_cart_len))
-        {
-            pd->system->logToConsole("open8: core_pd_boot_cart() failed");
+            pd->system->logToConsole("open8: core_pd_init() FAILED");
         }
         else
         {
-            g_booted = 1;
-            pd->system->logToConsole("open8: 1CELESTE booted (%u bytes)", celeste_cart_len);
+            pd->system->logToConsole("open8: [5] booting cart (%u bytes)...", celeste_cart_len);
+            if (!core_pd_boot_cart(celeste_cart, (long)celeste_cart_len))
+            {
+                pd->system->logToConsole("open8: core_pd_boot_cart() FAILED");
+            }
+            else
+            {
+                g_booted = 1;
+                pd->system->logToConsole("open8: [6] 1CELESTE booted OK");
+            }
         }
 
         pd->display->setRefreshRate(30.0f);
         pd->system->setUpdateCallback(update, pd);
+        pd->system->logToConsole("open8: [7] update callback set, entering loop");
     }
 
     return 0;
