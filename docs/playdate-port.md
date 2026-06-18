@@ -138,23 +138,59 @@ Makefiles" && cmake --build build`. Produces `Source/pdex.dylib` (eventHandler
 exported, verified with `nm`) and `open8.pdx` via pdc. The upstream SDL build is
 unaffected (verified: `src/core.c` still compiles under the SDL `compile_commands.json`).
 
-Status: **simulator build green and bundled.** Open `open8.pdx` in the Playdate
-Simulator (or sideload to device) to record the first baseline fps / split
-numbers — fill in the table below once observed.
+Status: **DONE — running on device (DVT1, SDK 3.0.6), baseline captured.**
+1CELESTE boots and is playable; serial profiler confirmed.
 
-| cart | fps | t_update (us) | t_draw (us) | t_blit (us) |
-|---|---|---|---|---|
-| 1CELESTE | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+Baseline (device, µs via getElapsedTime; refresh capped at 30):
 
-Immediate follow-ups (not part of milestone 1):
-- **Device (armgcc) link:** `load_cart`/`init_core` reference `fopen`/`fread`
-  (unused on Playdate — we boot from the embedded array). They compile but may
-  pull unresolved newlib syscalls when linking the device ELF; stub or
-  `#ifdef`-exclude the file path on device. Simulator links fine (host libc).
-- Verify the DWT cycle counter on real hardware (sim uses microseconds).
+| cart | phase | fps | t_update | t_draw | t_blit |
+|---|---|---|---|---|---|
+| 1CELESTE | title/menu | 30 | ~1.5 ms | ~24.5 ms | ~3.7 ms |
+| 1CELESTE | gameplay | 10–13 | ~35 ms (erratic, spikes to 50–780 ms) | ~45–50 ms | ~3.7 ms |
+
+#### What the baseline says (Phase 0 findings)
+
+1. **`t_draw` dominates** — ~24 ms on the title, ~45–50 ms in gameplay. This is
+   the #1 target. It is `_draw` = Lua draw calls + the graphics API blitting into
+   `0x6000`. Celeste's `map()` + per-object `spr()` is exactly the
+   spritesheet↔framebuffer fill path the bottleneck hypothesis predicted. Needs a
+   finer split (C-blit vs Lua-call overhead) before optimizing — see next.
+2. **`t_update` is erratic with huge spikes** (656 µs … 780 ms on one frame) —
+   the signature of **Lua GC pauses** / per-frame object allocation in Celeste.
+   The 780 ms frame is almost certainly room/level init. Secondary target; GC
+   tuning (pause/stepmul, or manual stepping) is a cheap candidate.
+3. **`t_blit` is small and rock-stable (~3.7 ms, ±5%)** — the 1-bit conversion is
+   **not** the wall. Confirms the 8 KB framebuffer stays cache-resident. Do not
+   optimize the blit yet (it is ~11% of the 33 ms budget). Prior refined:
+   fill-rate shows up inside `t_draw` (the API blit), not the final 1-bit pass.
+
+Net: at 30 fps the title *just* fits (~29.7 ms); gameplay is ~2.5–3× over budget,
+split roughly t_draw : t_update : t_blit ≈ 46 : 35 : 4 ms.
+
+Device bring-up notes (resolved):
+- **Device (armgcc) link** pulled unresolved newlib syscalls (`_read`/`_write`/
+  `_open`/...) via `fopen`/stb's file path. Fixed with `shim/pd_syscalls.c`
+  (no-op stubs, device-only build). The functions are never called — we boot
+  from the embedded array.
+#### FAILED EXPERIMENT: enabling DWT from game code → instant device crash
+First device build poked raw DWT/DEMCR registers in `pd_shim_init`
+(`DEMCR |= TRCENA; DWT_CTRL |= CYCCNTENA`). **It crashed immediately on hardware**
+(simulator was fine — it never ran that path). Cause: Playdate runs game code
+*unprivileged*, and the OS MPU protects the debug/SCS region, so the write faults.
+This is the same MPU regime as the ITCM write-protection. **Lesson: a Cortex-M7
+cycle counter is not freely available to Playdate games the way it is in bare-
+metal firmware.** Replaced with `getElapsedTime()` (µs) on both targets. A future
+cycle-accurate profiler would need a sanctioned SDK path, not raw registers.
+
+Next step (Phase 1, data-driven): **split `t_draw`** into time spent inside the
+C graphics API (spr/map/rectfill blitting `0x6000`) vs. Lua/VM call overhead, via
+a cycle accumulator in api.c. That decides whether Phase 2 targets the blit/
+fill path (cache) or the VM. Also: bundle 3JELPI (fill), 4RACER (VM), 7PICROSS
+(light) as embedded carts to get the comparison the test matrix wants.
 
 #### Experiments that failed
-_(none yet)_
+- **DWT cycle counter from game code** → instant crash (MPU/unprivileged). See
+  the device bring-up notes above. Now using `getElapsedTime()`.
 
 #### Notes / gotchas discovered
 - pdc converts `.png` assets to `.pdi`, which would destroy the steganographic
