@@ -8,6 +8,7 @@ build/
 platform/playdate/build/
 platform/playdate/build-device/
 platform/playdate/build-release/
+platform/playdate/build-profile/
 platform/playdate/*.pdx
 platform/playdate/Source/pdex.*
 game.map
