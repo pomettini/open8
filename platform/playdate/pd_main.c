@@ -22,9 +22,37 @@
 #include "memory.h"      /* pico8_ram */
 #include "auxiliary.h"   /* color_lookup */
 #include "pdshim.h"
+
+/* Declared in api.c. Not via api.h: that header pulls z8lua's lua.h, whose
+ * lua_State typedef collides with the Playdate SDK's pd_api_lua.h. */
+#ifdef OPEN8_PLATFORM_PLAYDATE
+extern int open8_profile_skip_fill;
+#endif
+
 #include "SDL3/SDL.h"    /* SDL_GAMEPAD_BUTTON_* (so the button mapping stays in sync) */
 
 #include "generated/cart_celeste.h"
+#include "generated/cart_jelpi.h"
+#include "generated/cart_racer.h"
+#include "generated/cart_picross.h"
+
+/* Test matrix (docs/playdate-port.md): real game / fill-heavy / VM-heavy / light.
+ * Switchable at runtime via the system menu so we can record a split per cart.
+ * Populated at init because the xxd `*_len` symbols are runtime globals. */
+typedef struct { const char* name; const unsigned char* data; unsigned int len; } cart_entry;
+#define NUM_CARTS 4
+static cart_entry  g_carts[NUM_CARTS];
+static const char* g_cart_titles[NUM_CARTS];
+static int         g_cart_index = 0;
+
+static void init_cart_registry(void)
+{
+    g_carts[0] = (cart_entry){ "celeste", celeste_cart, celeste_cart_len };
+    g_carts[1] = (cart_entry){ "jelpi",   jelpi_cart,   jelpi_cart_len };
+    g_carts[2] = (cart_entry){ "racer",   racer_cart,   racer_cart_len };
+    g_carts[3] = (cart_entry){ "picross", picross_cart, picross_cart_len };
+    for (int i = 0; i < NUM_CARTS; i++) g_cart_titles[i] = g_carts[i].name;
+}
 
 /* PICO-8 screen is 128x128; centre it in the 400x240 frame. 136 and 56 keep the
  * region byte-aligned (136 = 17*8, 128 = 16*8) so each output byte is built from
@@ -110,6 +138,44 @@ static uint32_t to_us(uint32_t delta)
     return pd_shim_ticks_are_cycles() ? (delta / 168u) : delta;
 }
 
+static int g_log_first = 1; /* reset on each cart (re)boot to re-log frame1 */
+
+static void boot_cart(int idx)
+{
+    if (idx < 0 || idx >= NUM_CARTS) return;
+    g_booted = 0;
+    g_cart_index = idx;
+    g_pd->system->logToConsole("open8: booting '%s' (%u bytes)...",
+                               g_carts[idx].name, g_carts[idx].len);
+    if (core_pd_boot_cart(g_carts[idx].data, (long)g_carts[idx].len))
+    {
+        g_booted = 1;
+        g_log_first = 1;
+        g_pd->system->logToConsole("open8: '%s' booted OK", g_carts[idx].name);
+    }
+    else
+    {
+        g_pd->system->logToConsole("open8: '%s' boot FAILED", g_carts[idx].name);
+    }
+}
+
+static void cart_menu_cb(void* ud)
+{
+    PDMenuItem* item = (PDMenuItem*)ud;
+    boot_cart(g_pd->system->getMenuItemValue(item));
+}
+
+static void skipfill_menu_cb(void* ud)
+{
+#ifdef OPEN8_PLATFORM_PLAYDATE
+    PDMenuItem* item = (PDMenuItem*)ud;
+    open8_profile_skip_fill = g_pd->system->getMenuItemValue(item);
+    g_pd->system->logToConsole("open8: skip_fill = %d", open8_profile_skip_fill);
+#else
+    (void)ud;
+#endif
+}
+
 static int update(void* userdata)
 {
     PlaydateAPI* pd = (PlaydateAPI*)userdata;
@@ -120,21 +186,20 @@ static int update(void* userdata)
         return 1;
     }
 
-    static int first = 1;
-    if (first) pd->system->logToConsole("open8: frame1 begin");
+    if (g_log_first) pd->system->logToConsole("open8: frame1 begin");
 
     uint32_t t0 = pd_shim_ticks();
     poll_input();
     core_pd_update();
-    if (first) pd->system->logToConsole("open8: frame1 update ok");
+    if (g_log_first) pd->system->logToConsole("open8: frame1 update ok");
     uint32_t t1 = pd_shim_ticks();
     core_pd_draw();
-    if (first) pd->system->logToConsole("open8: frame1 draw ok");
+    if (g_log_first) pd->system->logToConsole("open8: frame1 draw ok");
     uint32_t t2 = pd_shim_ticks();
 
     pd->graphics->clear(kColorBlack);
     blit_framebuffer();
-    if (first) { pd->system->logToConsole("open8: frame1 blit ok"); first = 0; }
+    if (g_log_first) { pd->system->logToConsole("open8: frame1 blit ok"); g_log_first = 0; }
     uint32_t t3 = pd_shim_ticks();
 
     uint32_t us_update = to_us(t1 - t0);
@@ -142,20 +207,27 @@ static int update(void* userdata)
     uint32_t us_blit   = to_us(t3 - t2);
     float    fps       = pd->display->getFPS();
 
+    int skip = 0;
+#ifdef OPEN8_PLATFORM_PLAYDATE
+    skip = open8_profile_skip_fill;
+#endif
+
     /* HUD in the left border (cols 0..135, clear of the 128x128 region). */
     if (g_font)
     {
         char line[64];
         pd->graphics->setFont(g_font);
         int n;
-        n = snprintf(line, sizeof(line), "fps %2d", (int)(fps + 0.5f));
+        n = snprintf(line, sizeof(line), "%s%s", g_carts[g_cart_index].name, skip ? " [nofill]" : "");
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 4);
-        n = snprintf(line, sizeof(line), "upd %lu", (unsigned long)us_update);
+        n = snprintf(line, sizeof(line), "fps %2d", (int)(fps + 0.5f));
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 24);
-        n = snprintf(line, sizeof(line), "drw %lu", (unsigned long)us_draw);
+        n = snprintf(line, sizeof(line), "upd %lu", (unsigned long)us_update);
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 44);
-        n = snprintf(line, sizeof(line), "blt %lu", (unsigned long)us_blit);
+        n = snprintf(line, sizeof(line), "drw %lu", (unsigned long)us_draw);
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 64);
+        n = snprintf(line, sizeof(line), "blt %lu", (unsigned long)us_blit);
+        pd->graphics->drawText(line, n, kASCIIEncoding, 4, 84);
     }
 
     /* Serial trace once per second. */
@@ -164,7 +236,8 @@ static int update(void* userdata)
     if (now_ms - last_log_ms >= 1000)
     {
         last_log_ms = now_ms;
-        pd->system->logToConsole("fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus",
+        pd->system->logToConsole("cart=%s nofill=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus",
+                                 g_carts[g_cart_index].name, skip,
                                  (int)(fps + 0.5f),
                                  (unsigned long)us_update,
                                  (unsigned long)us_draw,
@@ -185,6 +258,7 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
     {
         g_pd = pd;
         pd_shim_init(pd);
+        init_cart_registry();
         pd->system->logToConsole("open8: [1] init, shim ready");
 
         build_threshold_lut();
@@ -201,17 +275,17 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
         }
         else
         {
-            pd->system->logToConsole("open8: [5] booting cart (%u bytes)...", celeste_cart_len);
-            if (!core_pd_boot_cart(celeste_cart, (long)celeste_cart_len))
-            {
-                pd->system->logToConsole("open8: core_pd_boot_cart() FAILED");
-            }
-            else
-            {
-                g_booted = 1;
-                pd->system->logToConsole("open8: [6] 1CELESTE booted OK");
-            }
+            pd->system->logToConsole("open8: [5] booting first cart...");
+            boot_cart(0);
         }
+
+        /* System menu: pick a test cart, and toggle the t_draw fill probe. */
+        PDMenuItem* cart_item =
+            pd->system->addOptionsMenuItem("cart", g_cart_titles, NUM_CARTS, cart_menu_cb, NULL);
+        pd->system->setMenuItemUserdata(cart_item, cart_item);
+        PDMenuItem* skip_item =
+            pd->system->addCheckmarkMenuItem("no fill", 0, skipfill_menu_cb, NULL);
+        pd->system->setMenuItemUserdata(skip_item, skip_item);
 
         pd->display->setRefreshRate(30.0f);
         pd->system->setUpdateCallback(update, pd);

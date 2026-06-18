@@ -201,3 +201,58 @@ fill path (cache) or the VM. Also: bundle 3JELPI (fill), 4RACER (VM), 7PICROSS
 - The SDL screen-texture blit (`update_from_virtual_memory`) is compiled but
   never called on Playdate; `pd_main.c` blits `0x6000` directly. Dead path to
   remove in a later cleanup phase.
+
+### 2026-06-18 — Phase 1: per-cart `t_draw` split (skip-fill probe)
+
+Added `open8_profile_skip_fill` (api.c): the dominant blitters (cls/spr/sspr/map/
+rectfill/circfill/line/pset) early-return, so the VM still issues every draw call
+but no pixels are written. `t_draw(full) − t_draw(skip)` = C-side fill cost;
+`t_draw(skip)` = VM time spent interpreting `_draw`. Toggled live via a system
+menu item; 4 carts switchable via another. Measured on device, gameplay:
+
+| cart | fps | t_update | t_draw full | t_draw VM-only | ⇒ fill | t_blit |
+|---|---|---|---|---|---|---|
+| celeste | 13 | ~27.5 ms (+GC spikes to 850 ms) | ~43 ms | ~27.5 ms | **~15.5 ms** | 3.6 ms |
+| jelpi   | 6  | **~142 ms** | ~22 ms | ~2.8 ms | **~19 ms** | 3.7 ms |
+| picross | 13 | ~9.4 ms | ~63 ms | ~52.5 ms* | ~11 ms* | 3.6 ms |
+| racer   | — | — | broken | — | — | 3.7 ms |
+
+\* picross under-counts fill: it leans on `print()` (grid numbers), which is not
+in the skip set (cursor side-effects), so its print fill lands in the "VM-only"
+column.
+
+#### Findings — the prior is overturned
+
+1. **The VM is the wall, not the blitter.** Per frame, VM time (update+draw) is
+   celeste ~55 ms, jelpi ~145 ms, picross ~62 ms — i.e. ~75–98% of the frame.
+   The C pixel-fill is a *secondary* ~11–19 ms and never dominates any cart.
+2. **`t_blit` is ~3.6–3.7 ms and dead flat across all four carts** — definitively
+   not worth touching. (Strongest possible confirmation of the Phase 0 read.)
+3. **Fill cost is ~constant (~15 ms) regardless of cart** — it tracks screen
+   coverage (each fills ~the whole 128×128), not cart complexity. A blitter
+   rewrite buys ~15 ms; real but not the headline.
+4. **Two distinct VM costs:** steady interpretation (jelpi `_update` 142 ms is a
+   5× outlier → a pathological hot path worth bisecting; picross/celeste `_draw`
+   tens of ms) **and** GC pauses (celeste `_update` spikes to 850 ms periodically).
+
+#### Phase 2 target (decided by data): the z8lua VM
+
+Blit is out; fill is a later ~15 ms cleanup. First VM experiments, each behind a
+flag and device-measured:
+- **Interpreter dispatch:** check whether z8lua uses computed-goto / jump-table
+  dispatch (`LUAI_USE_*`); enabling it under device GCC is a known ~10–20% win.
+- **GC tuning:** kill the celeste `_update` 850 ms spikes via incremental GC
+  params (pause/stepmul) or per-frame stepping.
+- **Jelpi `_update` 142 ms outlier:** bisect/read its update to find the
+  pathological pattern (likely a tight Lua loop or a slow fixed-point/API path);
+  a 5× outlier usually hides one fixable hot spot that generalizes.
+- Suspected root cause (per Nofrendo prior): D-cache misses on Lua table/object
+  data. Confirm indirectly via the above experiments.
+
+#### Correctness bugs found (not perf)
+- **racer crashes**: `_draw:1608 arithmetic on nil 'tmp'`. Root cause:
+  `cartdata`/`dget` are stubbed (`TO_BE_DONE`) and return nil → used in math.
+  Fix: implement `dget`/`dset`/`cartdata` (return 0 / persistent store). Also the
+  per-call `Error calling _draw` log spams serial and inflates its own timing —
+  rate-limit VM error logging.
+- `menuitem`, `music`, `sfx`, `cartdata`, `dget` all log "not yet implemented".

@@ -31,6 +31,13 @@ extern fix32_t seconds_since_start;
 extern uint64_t pico8_frame_start;
 extern uint32_t pico8_frame_ms;
 
+#ifdef OPEN8_PLATFORM_PLAYDATE
+// Profiling toggle: when non-zero, the dominant blitters (cls/spr/sspr/map/
+// rectfill/circfill/line/pset) early-return. Set from pd_main to split t_draw
+// into C-side fill vs VM call overhead. See docs/playdate-port.md.
+extern int open8_profile_skip_fill;
+#endif
+
 void init_api(lua_State* L);
 void update_input(SDL_Renderer* renderer);
 void update_time(void);

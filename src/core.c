@@ -1411,6 +1411,11 @@ bool core_pd_init(void)
 
 bool core_pd_boot_cart(const uint8_t* data, long size)
 {
+    // Release any previously loaded cart (code buffer / cover texture) so
+    // switching carts at runtime doesn't leak. Safe on first boot: the static
+    // cart is zero-initialised and destroy_cart null-checks.
+    destroy_cart(&cart);
+
     if (!load_cart_bytes(pd_dummy_renderer, data, size, &cart))
     {
         return false;

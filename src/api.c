@@ -41,6 +41,16 @@ uint32_t pico8_frame_ms = 0;
 // Touch button state (when SDL_HINT_MOUSE_TOUCH_EVENTS is used).
 uint8_t touch_button_state = 0;
 
+#ifdef OPEN8_PLATFORM_PLAYDATE
+// Profiling: when set, the dominant blitters return immediately. Comparing
+// t_draw with this on vs off splits C-side pixel fill from VM call overhead.
+// See docs/playdate-port.md. Toggled from pd_main via a system menu item.
+int open8_profile_skip_fill = 0;
+#define OPEN8_SKIP_FILL() do { if (open8_profile_skip_fill) return 0; } while (0)
+#else
+#define OPEN8_SKIP_FILL() ((void)0)
+#endif
+
 // Input state: tracks how many consecutive frames each button has been held.
 // Index [player][button], players 0-1, buttons 0-5.
 static uint8_t btn_held_frames[2][6];
@@ -589,6 +599,8 @@ static int pico8_circ(lua_State* L)
 
 static int pico8_circfill(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     int cx = fix32_to_int(luaL_checknumber(L, 1));
     int cy = fix32_to_int(luaL_checknumber(L, 2));
 
@@ -617,6 +629,8 @@ static int pico8_clip(lua_State* L)
 
 static int pico8_cls(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     int color = fix32_to_int32(luaL_optinteger(L, 1, 0));
     uint8_t color_pair = (color & 0x0F) << 4 | (color & 0x0F);
 
@@ -739,6 +753,8 @@ static int pico8_fset(lua_State* L)
 
 static int pico8_line(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     int x0 = fix32_to_int(luaL_checknumber(L, 1));
     int y0 = fix32_to_int(luaL_checknumber(L, 2));
     int x1 = fix32_to_int(luaL_checknumber(L, 3));
@@ -994,6 +1010,8 @@ static int pico8_print(lua_State* L)
 
 static int pico8_pset(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     int x = (int)fix32_to_int32(luaL_checknumber(L, 1));
     int y = (int)fix32_to_int32(luaL_checknumber(L, 2));
 
@@ -1037,6 +1055,8 @@ static int pico8_rect(lua_State* L)
 
 static int pico8_rectfill(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     int x0 = fix32_to_int(luaL_checknumber(L, 1));
     int y0 = fix32_to_int(luaL_checknumber(L, 2));
     int x1 = fix32_to_int(luaL_checknumber(L, 3));
@@ -1134,6 +1154,8 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
 
 static int pico8_spr(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     /* Be defensive: some carts may attempt to call spr(nil) when an object's
      * spr field is missing. Instead of raising a Lua type error, silently
      * ignore the call which matches the robustness of the original PICO-8. */
@@ -1164,6 +1186,8 @@ static int pico8_sset(lua_State* L)
 
 static int pico8_sspr(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     int sx = fix32_to_int(luaL_checknumber(L, 1));
     int sy = fix32_to_int(luaL_checknumber(L, 2));
     int sw = fix32_to_int(luaL_checknumber(L, 3));
@@ -1279,6 +1303,8 @@ static void map_set(int col, int row, uint8_t sprite)
 
 static int pico8_map(lua_State* L)
 {
+    OPEN8_SKIP_FILL();
+
     int celx = fix32_to_int(luaL_optnumber(L, 1, 0));
     int cely = fix32_to_int(luaL_optnumber(L, 2, 0));
     int sx = fix32_to_int(luaL_optnumber(L, 3, 0));
