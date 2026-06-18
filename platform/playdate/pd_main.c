@@ -63,12 +63,12 @@ static void init_cart_registry(void)
  * multiple of 8 so each output byte is exactly 8 packed pixels with no straddle. */
 #define SRC_W         128
 #define SRC_H         128
-#define SCALE_W       200
-#define SCALE_H       200
-#define DEST_X        96            /* byte-aligned: 96/8 = 12 */
-#define DEST_Y        20            /* (240 - 200) / 2 */
-#define DEST_BYTE_X   (DEST_X / 8)  /* 12 */
-#define DEST_BYTES    (SCALE_W / 8) /* 25 */
+#define SCALE_W       240          /* 1.875x; fills the full 240px height */
+#define SCALE_H       240
+#define DEST_X        80            /* byte-aligned: 80/8 = 10, centred in 400 */
+#define DEST_Y        0             /* (240 - 240) / 2 */
+#define DEST_BYTE_X   (DEST_X / 8)  /* 10 */
+#define DEST_BYTES    (SCALE_W / 8) /* 30 */
 
 #define FB_BASE       0x6000
 #define DISP_PALETTE  0x5f10
