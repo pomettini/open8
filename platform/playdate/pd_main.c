@@ -141,6 +141,7 @@ static uint32_t to_us(uint32_t delta)
 }
 
 static int g_log_first = 1; /* reset on each cart (re)boot to re-log frame1 */
+static int g_gc_off = 0;    /* GC diagnostic: 1 = Lua collector stopped */
 
 static void boot_cart(int idx)
 {
@@ -153,6 +154,7 @@ static void boot_cart(int idx)
     {
         g_booted = 1;
         g_log_first = 1;
+        core_pd_set_gc(!g_gc_off); /* re-apply: a fresh VM starts with GC on */
         g_pd->system->logToConsole("open8: '%s' booted OK", g_carts[idx].name);
     }
     else
@@ -176,6 +178,14 @@ static void skipfill_menu_cb(void* ud)
 #else
     (void)ud;
 #endif
+}
+
+static void gc_menu_cb(void* ud)
+{
+    PDMenuItem* item = (PDMenuItem*)ud;
+    g_gc_off = g_pd->system->getMenuItemValue(item);
+    core_pd_set_gc(!g_gc_off);
+    g_pd->system->logToConsole("open8: gc_off = %d", g_gc_off);
 }
 
 static int update(void* userdata)
@@ -232,7 +242,8 @@ static int update(void* userdata)
         char line[64];
         pd->graphics->setFont(g_font);
         int n;
-        n = snprintf(line, sizeof(line), "%s%s", g_carts[g_cart_index].name, skip ? " [nofill]" : "");
+        n = snprintf(line, sizeof(line), "%s%s%s", g_carts[g_cart_index].name,
+                     skip ? " [nofill]" : "", g_gc_off ? " [gc-off]" : "");
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 4);
         n = snprintf(line, sizeof(line), "fps %2d", (int)(fps + 0.5f));
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 24);
@@ -250,8 +261,8 @@ static int update(void* userdata)
     if (now_ms - last_log_ms >= 1000)
     {
         last_log_ms = now_ms;
-        pd->system->logToConsole("cart=%s nofill=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus  | upd[i=%lu c=%lu] drw[i=%lu c=%lu]",
-                                 g_carts[g_cart_index].name, skip,
+        pd->system->logToConsole("cart=%s nofill=%d gcoff=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus  | upd[i=%lu c=%lu] drw[i=%lu c=%lu]",
+                                 g_carts[g_cart_index].name, skip, g_gc_off,
                                  (int)(fps + 0.5f),
                                  (unsigned long)us_update,
                                  (unsigned long)us_draw,
@@ -302,6 +313,9 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
         PDMenuItem* skip_item =
             pd->system->addCheckmarkMenuItem("no fill", 0, skipfill_menu_cb, NULL);
         pd->system->setMenuItemUserdata(skip_item, skip_item);
+        PDMenuItem* gc_item =
+            pd->system->addCheckmarkMenuItem("gc off", 0, gc_menu_cb, NULL);
+        pd->system->setMenuItemUserdata(gc_item, gc_item);
 
         pd->display->setRefreshRate(30.0f);
         pd->system->setUpdateCallback(update, pd);

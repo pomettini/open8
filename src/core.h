@@ -55,6 +55,7 @@ bool core_pd_init(void);
 bool core_pd_boot_cart(const uint8_t* data, long size);
 void core_pd_update(void);
 void core_pd_draw(void);
+void core_pd_set_gc(int on);
 #endif
 
 #endif // CORE_H

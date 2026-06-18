@@ -20,6 +20,10 @@
 #include "core.h"
 #include "memory.h"
 
+#ifdef OPEN8_ARENA_ALLOC
+#include "arena_alloc.h"
+#endif
+
 #define STBI_ONLY_PNG
 #define STBI_NO_THREAD_LOCALS
 #define STB_IMAGE_IMPLEMENTATION
@@ -136,7 +140,14 @@ static void update_touch_input(SDL_Renderer* renderer)
 
 static bool init_vm(SDL_Renderer* renderer)
 {
+#ifdef OPEN8_ARENA_ALLOC
+    // Phase 2 experiment: locality-improving Lua allocator. Reset is safe here —
+    // run_cartridge closes the previous VM before calling init_vm.
+    arena_reset();
+    vm = lua_newstate(arena_alloc, NULL);
+#else
     vm = lua_newstate(mem_allocator, NULL);
+#endif
     if (!vm)
     {
         SDL_Log("Couldn't create Lua state.");
@@ -1445,5 +1456,15 @@ void core_pd_draw(void)
         call_pico8_function(vm, "_draw");
     }
     update_time();
+}
+
+// Phase 2 GC diagnostic: stop/restart the Lua collector at runtime. If frame
+// time collapses with GC stopped, GC/allocator churn is the bottleneck.
+void core_pd_set_gc(int on)
+{
+    if (vm)
+    {
+        lua_gc(vm, on ? LUA_GCRESTART : LUA_GCSTOP, 0);
+    }
 }
 #endif // OPEN8_PLATFORM_PLAYDATE

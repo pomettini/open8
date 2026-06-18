@@ -352,3 +352,44 @@ is the wall → then tune it (generational mode, or incremental pause/stepmul, o
 a per-frame step budget; possibly pool allocations to dodge `pdrealloc`). If it
 *doesn't* collapse → the cost is the C-call/allocator path itself, investigate
 that. Either way the next number is the answer.
+
+### 2026-06-18 — Phase 2 experiment #3: GC-off diagnostic — GC RULED OUT
+
+`gc off` menu toggle (`lua_gc(GCSTOP/RESTART)` via `core_pd_set_gc`). Device:
+
+| cart | t_update gcoff=0 | t_update gcoff=1 |
+|---|---|---|
+| celeste | ~27.4 ms | **~27.4 ms** (identical) |
+| jelpi   | ~149 ms  | **~147 ms** (noise) |
+
+Stopping the collector changed **nothing**, and the 785 ms celeste room-load
+spike **persists with GC off** — so even that hitch is not a collection. **GC is
+not the bottleneck.** Hypothesis wrong; cheap to find out.
+
+### CONCLUSION — the wall is D-cache misses on the Lua heap (the predicted one)
+
+By elimination (blit, dispatch, bytecode volume, GC all ruled out) plus two
+positive signals, the bottleneck is **memory latency on the Lua working set**:
+
+- **Per-unit wall-time ≫ cycle cost:** 11–17 µs per bytecode instruction
+  (~1800–2900 cycles @168 MHz) where the op itself is ~10–30 cycles. The
+  difference is memory stalls.
+- **Per-instruction cost scales with heap size** — the smoking gun:
+  celeste (114 KB heap) ~17 µs/instr; jelpi (51 KB heap) ~11 µs/instr. Bigger
+  working set → worse cache → slower per op. Exactly cache-miss-bound behaviour.
+- TValue is 8 B; tables/stack are arrays of 8 B slots with hash-part pointer
+  indirection. Working sets of 51–114 KB ≫ the 16 KB D-cache → thrash. The heap
+  is in main RAM (DTCM has only ~8 KB free — can't hold it).
+
+This is precisely the bottleneck called out up front. The cheap levers are now
+exhausted; remaining options are deep and uncertain:
+
+1. **Shrink z8lua's memory footprint** (pack TValue toward 4 B; reduce table/
+   object overhead) → smaller working set → better cache residency. Deep VM
+   surgery, risky, payoff uncertain but directly targets the proven cause.
+2. **Accept the envelope:** complex carts (celeste, jelpi) ~6–13 fps; lighter
+   carts hit 30. Ship what's playable, document the ceiling.
+3. **Faster memory for the hot heap** — not available (DTCM ~8 KB free; can't
+   relocate a 50–114 KB heap; MPU/cacheability not game-controllable).
+
+`t_blit` stayed ~3.7 ms flat across every experiment — the display path is done.

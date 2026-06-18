@@ -41,6 +41,7 @@ set(OPEN8_SOURCES
 	# Playdate backend.
 	${CMAKE_CURRENT_SOURCE_DIR}/pd_main.c
 	${CMAKE_CURRENT_SOURCE_DIR}/shim/pdshim.c
+	${CMAKE_CURRENT_SOURCE_DIR}/arena_alloc.c
 	# open8 core (SDL-free heart, compiled against the shim).
 	${OPEN8_SRC}/api.c
 	${OPEN8_SRC}/core.c
@@ -76,6 +77,8 @@ target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PLATFORM_PLAYDATE=1)
 # past the 16KB I-cache. Left in lvm.c behind the flag but disabled. See
 # docs/playdate-port.md. Re-enable only to reproduce the negative result.
 # target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_VM_GOTO=1)
+# Phase 2 experiment #4: locality-improving arena allocator for the Lua heap.
+target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_ARENA_ALLOC=1)
 
 target_include_directories(${OPEN8_TARGET} PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}          # generated/cart_celeste.h
