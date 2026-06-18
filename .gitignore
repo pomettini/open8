@@ -7,6 +7,7 @@ build/
 # Playdate build artifacts
 platform/playdate/build/
 platform/playdate/build-device/
+platform/playdate/build-release/
 platform/playdate/*.pdx
 platform/playdate/Source/pdex.*
 game.map

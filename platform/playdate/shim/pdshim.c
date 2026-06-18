@@ -30,10 +30,9 @@ void pd_shim_set_buttons(uint32_t mask)
 
 uint32_t pd_shim_ticks(void)
 {
-    /* Microseconds on both device and simulator. getElapsedTime() is a
-     * high-resolution monotonic timer that works identically on each, which
-     * keeps milestone 1 free of device-only register access. A cycle-accurate
-     * DWT counter is a later, separately-verified profiling refinement. */
+    /* Microseconds on both device and simulator. Raw DWT access faults because
+     * Playdate game code is unprivileged, so getElapsedTime() is the supported
+     * high-resolution monotonic timer for the profiling splits. */
     return pd ? (uint32_t)(pd->system->getElapsedTime() * 1000000.0f) : 0;
 }
 
@@ -194,5 +193,5 @@ SDL_Finger** SDL_GetTouchFingers(SDL_JoystickID touchID, int* count)
 bool SDL_EnumerateDirectory(const char* path, SDL_EnumerateDirectoryCallback cb, void* userdata)
 {
     (void)path; (void)cb; (void)userdata;
-    return false; /* carts are embedded on Playdate (milestone 1). */
+    return false; /* Current Playdate test carts are embedded. */
 }

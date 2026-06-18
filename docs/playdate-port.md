@@ -4,9 +4,17 @@ Living log for porting open8 (this repo's portable PICO-8 player) to the
 Playdate (STM32F746, Cortex-M7 @168 MHz, 400×240 1-bit display).
 
 **This file documents experiments that FAIL as well as those that succeed.**
-Every optimization is gated behind a compile flag and judged by the always-on
-profiler (see "Measurement"). Do not delete a failed experiment's notes — the
-"why it didn't work" is the most valuable part.
+Risky or intrusive optimizations are gated behind compile flags and judged by
+the measurement harness (see "Measurement"). Do not delete a failed
+experiment's notes — the "why it didn't work" is the most valuable part.
+
+> **Major correction, 2026-06-18:** every device performance result through
+> Phase 2 experiment #4 was collected from a CMake build with an empty
+> `CMAKE_BUILD_TYPE`, therefore with **no `-O` optimization flag**. Those
+> measurements remain useful as experiment history, but they do not establish a
+> hardware ceiling or prove a cache-bound bottleneck. The corrected Release
+> build raises Celeste gameplay from 10–13 fps to 17–19 fps and reduces the
+> final display blit from ~3.7 ms to ~1.2 ms. Release is now the default.
 
 ---
 
@@ -24,7 +32,7 @@ from-scratch build.
 | Graphics API | `src/api.c` | done, writes 4bpp `0x6000` |
 | FB→display blit | `src/memory.c` `update_from_virtual_memory` | SDL-coupled; replaced on Playdate |
 | Cart loader / decompress | `src/lexaloffle/`, `src/core.c` | done; PNG decode via vendored `stb_image` (SDL-free) |
-| Audio synth | `src/api.c` `pico8_sfx/_music` | **stubbed `TO_BE_DONE`** — green-field |
+| Audio synth | `src/audio.c`, `src/api.c` | working core: SFX + basic music |
 | Platform seam | `src/main.c`, `src/app.c` | SDL3; replaced by `platform/playdate/` |
 
 ## Hardware constraints (do not rediscover)
@@ -36,8 +44,8 @@ from-scratch build.
   8 KB — relocating it (or the dither LUTs) into DTCM is a *measured* candidate,
   not an assumption.
 - 400×240 1-bit display. PICO-8 is 128×128, 16 colors.
-- Prior (Nofrendo): the wall was **D-cache misses on the working set**, not the
-  interpreter hot loop. Expect the same shape here.
+- Prior (Nofrendo): D-cache misses were the wall there. Treat that only as a
+  hypothesis here; the first open8 investigation accidentally benchmarked `-O0`.
 
 ## Bottleneck hypothesis (to be confirmed by measurement, NOT assumed)
 
@@ -50,15 +58,21 @@ from-scratch build.
 - New per-frame cost the SDL build never paid: converting the 8 KB indexed FB
   to 1-bit every frame.
 
-## Measurement (always-on, low overhead, split by component)
+## Measurement
 
-Device: DWT cycle counter (`DWT->CYCCNT`, 168 MHz, ~free). Simulator: fall back
-to `pd->system->getElapsedTime()` (DWT is meaningless off-device). Splits:
+Device and simulator use `pd->system->getElapsedTime()` in microseconds. Raw DWT
+access is unavailable to unprivileged Playdate game code and faults on device.
+Splits:
 `t_update` (Lua `_update`), `t_draw` (Lua `_draw` + graphics API), `t_blit`
-(0x6000 → 1-bit → Playdate frame), later `t_audio`. Surfaced two ways behind
-the always-compiled `OPEN8_PROFILE` flag: an on-device HUD (toggle button) in
-the 400×240 border, and a once-per-second serial line via `logToConsole`.
-Budget: 5.6 M cycles @30 fps, 2.8 M @60 fps.
+(0x6000 → 1-bit → Playdate frame). The HUD and once-per-second serial timing
+remain in production. Expensive probes are opt-in:
+
+- `OPEN8_PROFILE_TOOLS=ON`: skip-fill control for splitting VM and pixel fill.
+- `OPEN8_PROFILE_LOAD=ON`: per-opcode and per-C-call counters; this deliberately
+  perturbs timing and is for counts only.
+- `OPEN8_ARENA_ALLOCATOR=ON`: historical allocator experiment.
+
+Budget: 33.3 ms/frame at 30 fps.
 
 ## Display & audio strategy
 
@@ -68,8 +82,8 @@ Budget: 5.6 M cycles @30 fps, 2.8 M @60 fps.
 - **16→1 bit:** milestone 1 uses a plain luminance **threshold** (so we can see
   output and measure). Ordered Bayer 4×4 dithering, computed from the
   *post-display-palette* color, is Phase 1/2.
-- **Audio:** stubbed today; port FAKE-08's synth later (Phase 4). SFX-only mono
-  first, then the music tracker. `t_audio` hook wired from the start.
+- **Audio:** a platform-independent PICO-8 synth now provides SFX and basic
+  music through a Playdate mono source callback.
 
 ## Test carts
 
@@ -95,6 +109,35 @@ Budget: 5.6 M cycles @30 fps, 2.8 M @60 fps.
 - **Phase 3 — VM / data-cache**, data-driven. Target: 4RACER + Celeste 30 fps.
 - **Phase 4 — audio.** SFX→music, no fps regression.
 - **Phase 5 — polish / optional 1.875× scaler.**
+
+## Build profiles
+
+The Playdate CMake project defaults single-config generators to `Release`.
+Never benchmark a build until the generated `flags.make` contains `-O2` or
+better.
+
+Production device build:
+
+```sh
+cmake -S platform/playdate -B platform/playdate/build-release \
+  -G "Unix Makefiles" \
+  -DCMAKE_TOOLCHAIN_FILE="$PLAYDATE_SDK_PATH/C_API/buildsupport/arm.cmake"
+cmake --build platform/playdate/build-release
+```
+
+Corrected skip-fill experiment:
+
+```sh
+cmake -S platform/playdate -B platform/playdate/build-profile \
+  -G "Unix Makefiles" \
+  -DCMAKE_TOOLCHAIN_FILE="$PLAYDATE_SDK_PATH/C_API/buildsupport/arm.cmake" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DOPEN8_PROFILE_TOOLS=ON
+cmake --build platform/playdate/build-profile
+```
+
+Keep `OPEN8_PROFILE_LOAD=OFF` while timing; its global counter increments occur
+for every Lua instruction and C call.
 
 ---
 
@@ -366,10 +409,11 @@ Stopping the collector changed **nothing**, and the 785 ms celeste room-load
 spike **persists with GC off** — so even that hitch is not a collection. **GC is
 not the bottleneck.** Hypothesis wrong; cheap to find out.
 
-### CONCLUSION — the wall is D-cache misses on the Lua heap (the predicted one)
+### Historical `-O0` conclusion — D-cache wall (later invalidated)
 
-By elimination (blit, dispatch, bytecode volume, GC all ruled out) plus two
-positive signals, the bottleneck is **memory latency on the Lua working set**:
+At the time, elimination plus two apparent signals suggested memory latency on
+the Lua working set. This interpretation is retained as experiment history, but
+the missing compiler optimization flag invalidates the cycle-cost assumptions:
 
 - **Per-unit wall-time ≫ cycle cost:** 11–17 µs per bytecode instruction
   (~1800–2900 cycles @168 MHz) where the op itself is ~10–30 cycles. The
@@ -381,8 +425,9 @@ positive signals, the bottleneck is **memory latency on the Lua working set**:
   indirection. Working sets of 51–114 KB ≫ the 16 KB D-cache → thrash. The heap
   is in main RAM (DTCM has only ~8 KB free — can't hold it).
 
-This is precisely the bottleneck called out up front. The cheap levers are now
-exhausted; remaining options are deep and uncertain:
+This was treated as the final diagnosis. It is no longer the current diagnosis:
+the same source compiled as Release substantially outperformed this baseline.
+The following were the options considered at the time:
 
 1. **Shrink z8lua's memory footprint** (pack TValue toward 4 B; reduce table/
    object overhead) → smaller working set → better cache residency. Deep VM
@@ -407,14 +452,8 @@ churn + full GCs.
 | celeste | ~27.4 ms | ~26.9 ms (≈ noise) |
 | jelpi   | ~149–155 ms | ~152–156 ms (no change) |
 
-Object *placement* is not the lever. The misses are inherent to the *access
-pattern* — the cart's own pointer-chasing over tables/objects — which an
-allocator can't change. Instruction/C-call counts identical (the allocator
-doesn't change what runs). **Memory levers now exhausted:** dispatch (regressed),
-bytecode (cheap), GC (no effect), footprint (packing → predicted Cortex-M
-regression), placement (this, null). The wall is the cart's data working set
-(51–114 KB) ≫ 16 KB D-cache, in external RAM, accessed by cart-defined pointer
-chasing — unchangeable from our side.
+The arena did not help this `-O0` binary. That result must be repeated against
+Release before drawing conclusions about object placement or cache behavior.
 
 ### Q: use the Playdate's built-in Lua interpreter instead of z8lua?
 
@@ -430,23 +469,19 @@ Asked, and worth recording. **No — blocked three ways, and it wouldn't help:**
    `& | ^^ << >> >>> <<> >><`, `@ % $` peek ops). z8lua is a *fork* with a custom
    lexer/parser and a fixed-point number type precisely for this. Stock Lua 5.4
    (double/int) would fail to parse most carts and miscompute the rest.
-3. **It targets the wrong layer.** The bottleneck is D-cache misses on the cart's
-   *data*, which lives in the same external RAM with the same access pattern no
-   matter which interpreter runs it. "Already in memory" concerns interpreter
-   *code* — and the load characterizer proved interpreter code/dispatch is the
-   cheap part. A faster/resident interpreter optimises what's already fast.
+3. **It still targets an incompatible layer.** Even after retracting the cache
+   diagnosis, the runtime source-loading and PICO-8 semantic incompatibilities
+   remain decisive blockers.
 
-Even build-time transpilation (PICO-8 → native Lua `.pdz`, dodging #1) still hits
-#2 (fixed-point) and #3 (same data wall). Not a path.
+Even build-time transpilation (PICO-8 → native Lua `.pdz`, dodging #1) still
+hits #2: language and numeric semantics would need a substantial compatibility
+layer. It is not the next performance path.
 
-### Phase 2 verdict
+### Historical Phase 2 verdict — retracted
 
-The non-obvious bottleneck called out on day one is confirmed and proven
-unchangeable from software: **cart data working set ≫ D-cache, external RAM,
-cart-defined access pattern.** Performance envelope: light carts 30 fps; complex
-carts (celeste, jelpi) ~6–13 fps. Display path done; measurement harness is the
-durable asset. Recommended pivot: correctness/completeness (fix racer's
-dget/cartdata, implement audio) over further perf chasing.
+The “unchangeable hardware wall” verdict was wrong because the baseline binary
+was unoptimized. All dispatch, GC, allocator, skip-fill, and load-characterizer
+results above must be regarded as `-O0` results until repeated under Release.
 
 ### 2026-06-18 — Wrap-up: correctness + audio
 
@@ -465,5 +500,73 @@ dget/cartdata, implement audio) over further perf chasing.
   slide/vibrato/arp note effects are approximated/stubbed, and tempo/mix
   constants may want on-device tuning. The game/audio-thread share of pico8_ram +
   channel state is an accepted minor race for now.
+
+### 2026-06-18 — Critical correction: the device baseline was `-O0`
+
+The generated device cache and flags exposed the missing experiment:
+
+- `CMAKE_BUILD_TYPE:STRING=` was empty.
+- `CMAKE_C_FLAGS` was empty.
+- The generated device `C_FLAGS` contained Cortex-M7/ABI/debug flags but no
+  `-O1`, `-O2`, `-O3`, or `-Os`.
+
+Therefore every performance result above was measured from an unoptimized
+binary. This explains the implausible 1,800–2,900 “cycles per bytecode
+instruction”: that quotient mixed bytecode, thousands of Lua↔C calls, graphics
+work, out-of-line `static inline` helpers, and `-O0` stack traffic. It was not a
+measurement of cache-miss latency.
+
+Static comparison, same ARM GCC toolchain:
+
+| property | original empty build type | corrected Release |
+|---|---:|---:|
+| ELF text | 237,776 B | 186,240 B |
+| `luaV_execute` | 8,052 B | 5,548 B |
+| emitted `fix32_*` helper functions | 90 | 0 |
+
+The SDK appends `-O2` after CMake's Release flags, so `-O2` is the effective
+optimization level. Inlining removes the numerous fixed-point helper calls and
+shrinks the VM/API hot code enough to materially improve I-cache behavior.
+
+The corrected production profile also:
+
+- compiles opcode/C-call counters out unless `OPEN8_PROFILE_LOAD=ON`;
+- compiles skip-fill branches/menu code out unless `OPEN8_PROFILE_TOOLS=ON`;
+- disables the null-result 4 MB arena unless `OPEN8_ARENA_ALLOCATOR=ON`;
+- pre-sizes the snapshot table used by `all()` and caches its iterator length;
+- fixes the host test target to include the audio implementation.
+
+All host tests pass, including sparse `all()` and mutation-during-iteration
+coverage.
+
+#### Corrected device result
+
+Measured on the same Playdate after installing and launching the Release build:
+
+| cart | phase | fps | t_update | t_draw | t_blit |
+|---|---|---:|---:|---:|---:|
+| Celeste | title/menu | 30 | ~1.2–1.5 ms | ~12–13 ms | ~1.2–1.3 ms |
+| Celeste | gameplay | **17–19** | ~14–23 ms | ~26–30 ms | ~1.2 ms |
+
+This is a large real-device win over 10–13 fps gameplay, and it decisively
+retracts the “6–13 fps hardware ceiling.” The remaining Celeste frame is roughly
+48–52 ms; reaching 30 fps requires removing another ~15–19 ms, about a further
+1.5× improvement rather than the previous apparent 2.5–3× gap.
+
+#### Next experiment
+
+Re-establish the component split under the corrected baseline:
+
+1. Build Release with `OPEN8_PROFILE_TOOLS=ON`, while keeping
+   `OPEN8_PROFILE_LOAD=OFF` and `OPEN8_ARENA_ALLOCATOR=OFF`.
+2. Measure full vs no-fill for Celeste gameplay and each embedded test cart.
+3. If no-fill moves Celeste below ~33 ms total, focus on direct graphics paths
+   (`map`/`spr`, packed-nibble writes, palette lookup reuse).
+4. If VM time still dominates, instrument C functions by coarse category—not
+   per opcode—and test whether repeated `all()` snapshots/object iteration are
+   the update/draw hot path.
+
+Do not retest computed-goto, GC, or the arena until this optimized full/no-fill
+baseline exists.
 
 See [POSTMORTEM.md](POSTMORTEM.md) for the full retrospective.

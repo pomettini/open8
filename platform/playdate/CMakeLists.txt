@@ -1,16 +1,29 @@
-# Playdate build for open8 (milestone 1 / Phase 0).
+# Playdate build for open8.
 #
 # Self-contained: reuses the open8 sources under ../../src compiled with the SDL
 # shim and OPEN8_PLATFORM_PLAYDATE. The root CMakeLists.txt (the SDL build) is
 # untouched.
 #
 # Build (simulator):
-#   cd platform/playdate && cmake -B build -G "Unix Makefiles" && cmake --build build
+#   cmake -S platform/playdate -B platform/playdate/build -G "Unix Makefiles"
+#   cmake --build platform/playdate/build
 # Build (device):
-#   cmake -B build-device -G "Unix Makefiles" -DCMAKE_TOOLCHAIN_FILE=$PLAYDATE_SDK_PATH/C_API/buildsupport/arm.cmake
-#   cmake --build build-device
+#   cmake -S platform/playdate -B platform/playdate/build-release -G "Unix Makefiles" \
+#     -DCMAKE_TOOLCHAIN_FILE=$PLAYDATE_SDK_PATH/C_API/buildsupport/arm.cmake
+#   cmake --build platform/playdate/build-release
+#
+# Single-config generators default to Release. An empty CMAKE_BUILD_TYPE
+# silently produced the original unoptimized benchmark binary.
 cmake_minimum_required(VERSION 3.19)
 set(CMAKE_C_STANDARD 11)
+
+if (NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+	set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+option(OPEN8_PROFILE_LOAD "Count every Lua opcode and C call" OFF)
+option(OPEN8_PROFILE_TOOLS "Build runtime skip-fill profiling controls" OFF)
+option(OPEN8_ARENA_ALLOCATOR "Use the experimental Lua arena allocator" OFF)
 
 set(ENVSDK $ENV{PLAYDATE_SDK_PATH})
 if (NOT "${ENVSDK}" STREQUAL "")
@@ -28,8 +41,6 @@ if (NOT EXISTS ${SDK})
 	return()
 endif()
 
-set(CMAKE_CONFIGURATION_TYPES "Debug;Release")
-
 set(PLAYDATE_GAME_NAME open8)
 set(PLAYDATE_GAME_DEVICE open8_DEVICE)
 
@@ -41,7 +52,6 @@ set(OPEN8_SOURCES
 	# Playdate backend.
 	${CMAKE_CURRENT_SOURCE_DIR}/pd_main.c
 	${CMAKE_CURRENT_SOURCE_DIR}/shim/pdshim.c
-	${CMAKE_CURRENT_SOURCE_DIR}/arena_alloc.c
 	# open8 core (SDL-free heart, compiled against the shim).
 	${OPEN8_SRC}/api.c
 	${OPEN8_SRC}/core.c
@@ -63,6 +73,10 @@ set(OPEN8_SOURCES
 	${OPEN8_SRC}/z8lua/ltm.c    ${OPEN8_SRC}/z8lua/lundump.c ${OPEN8_SRC}/z8lua/lvm.c
 	${OPEN8_SRC}/z8lua/lzio.c)
 
+if (OPEN8_ARENA_ALLOCATOR)
+	list(APPEND OPEN8_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/arena_alloc.c)
+endif()
+
 if (TOOLCHAIN STREQUAL "armgcc")
 	# Device build needs newlib syscall stubs (carts are embedded; no POSIX FS).
 	add_executable(${PLAYDATE_GAME_DEVICE} ${OPEN8_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/shim/pd_syscalls.c)
@@ -73,13 +87,18 @@ else()
 endif()
 
 target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PLATFORM_PLAYDATE=1)
-# Phase 2 experiment #1 (computed-goto VM dispatch) REGRESSED on device — the
-# VM is memory-bound, not dispatch-bound, and threading bloats the interpreter
-# past the 16KB I-cache. Left in lvm.c behind the flag but disabled. See
-# docs/playdate-port.md. Re-enable only to reproduce the negative result.
+# The original computed-goto experiment regressed in an unoptimized build.
+# Keep it disabled until it is re-tested against the corrected Release baseline.
 # target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_VM_GOTO=1)
-# Phase 2 experiment #4: locality-improving arena allocator for the Lua heap.
-target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_ARENA_ALLOC=1)
+if (OPEN8_PROFILE_LOAD)
+	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PROFILE_LOAD=1)
+endif()
+if (OPEN8_PROFILE_TOOLS)
+	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_PROFILE_TOOLS=1)
+endif()
+if (OPEN8_ARENA_ALLOCATOR)
+	target_compile_definitions(${OPEN8_TARGET} PRIVATE OPEN8_ARENA_ALLOC=1)
+endif()
 
 target_include_directories(${OPEN8_TARGET} PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}          # generated/cart_celeste.h
@@ -89,5 +108,10 @@ target_include_directories(${OPEN8_TARGET} PRIVATE
 
 # Silence the upstream sources' expected noise so the real warnings stand out.
 target_compile_options(${OPEN8_TARGET} PRIVATE -Wno-unused-parameter -Wno-sign-compare)
+
+message(STATUS "open8 Playdate build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "open8 load counters: ${OPEN8_PROFILE_LOAD}")
+message(STATUS "open8 profiling tools: ${OPEN8_PROFILE_TOOLS}")
+message(STATUS "open8 arena allocator: ${OPEN8_ARENA_ALLOCATOR}")
 
 include(${SDK}/C_API/buildsupport/playdate_game.cmake)

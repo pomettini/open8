@@ -5,9 +5,8 @@
  *  Small Lua objects (the numerous, scattered, cache-relevant ones) are served
  *  from one contiguous region via size-classed free lists, so same-size objects
  *  cluster and reused slots stay cache-warm. Large blocks (stack, big arrays)
- *  fall through to the system allocator. Targets the proven cause (D-cache
- *  misses on the heap working set) without the unaligned-access penalty a packed
- *  TValue would incur on Cortex-M7. See docs/playdate-port.md.
+ *  fall through to the system allocator. This remains available for controlled
+ *  Release-build comparisons but is disabled in production.
  *
  *  No platform deps: the backing block comes from malloc (which the Playdate SDK
  *  routes to pd->system->realloc on device), so this also builds/host-tests

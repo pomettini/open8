@@ -1,14 +1,11 @@
 /** @file pd_main.c
  *
- *  Playdate backend entry point for open8 (milestone 1 / Phase 0).
+ *  Playdate backend entry point for open8.
  *
- *  Boots an embedded 1CELESTE cart, runs the z8lua VM, threshold-blits the
- *  PICO-8 framebuffer (0x6000) to the 400x240 1-bit display at 1:1, and reports
- *  per-component frame timing (t_update / t_draw / t_blit) via an on-screen HUD
- *  and a once-per-second serial line.
- *
- *  No optimization here by design — this exists to close the measurement loop
- *  on real hardware. See docs/playdate-port.md.
+ *  Boots embedded test carts, runs the z8lua VM, threshold-blits the PICO-8
+ *  framebuffer to the 1-bit display, and reports update/draw/blit timing.
+ *  Expensive probes are separately gated by OPEN8_PROFILE_LOAD and
+ *  OPEN8_PROFILE_TOOLS so production builds do not pay their overhead.
  *
  *  SPDX-License-Identifier: MIT
  **/
@@ -26,8 +23,10 @@
 
 /* Declared in api.c / lvm.c. Not via their headers: those pull z8lua's lua.h,
  * whose lua_State typedef collides with the Playdate SDK's pd_api_lua.h. */
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_TOOLS
 extern int open8_profile_skip_fill;
+#endif
+#ifdef OPEN8_PROFILE_LOAD
 extern uint32_t open8_vm_instr_count;   /* bytecode ops executed (load characterizer) */
 extern uint32_t open8_vm_ccall_count;   /* C-function calls executed */
 #endif
@@ -177,16 +176,14 @@ static void cart_menu_cb(void* ud)
     boot_cart(g_pd->system->getMenuItemValue(item));
 }
 
+#ifdef OPEN8_PROFILE_TOOLS
 static void skipfill_menu_cb(void* ud)
 {
-#ifdef OPEN8_PLATFORM_PLAYDATE
     PDMenuItem* item = (PDMenuItem*)ud;
     open8_profile_skip_fill = g_pd->system->getMenuItemValue(item);
     g_pd->system->logToConsole("open8: skip_fill = %d", open8_profile_skip_fill);
-#else
-    (void)ud;
-#endif
 }
+#endif
 
 static void gc_menu_cb(void* ud)
 {
@@ -208,22 +205,24 @@ static int update(void* userdata)
 
     if (g_log_first) pd->system->logToConsole("open8: frame1 begin");
 
+#ifdef OPEN8_PROFILE_LOAD
     uint32_t ui = 0, uc = 0, di = 0, dc = 0; /* per-phase load counts */
+#endif
 
     uint32_t t0 = pd_shim_ticks();
     poll_input();
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_LOAD
     open8_vm_instr_count = 0; open8_vm_ccall_count = 0;
 #endif
     core_pd_update();
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_LOAD
     ui = open8_vm_instr_count; uc = open8_vm_ccall_count;
     open8_vm_instr_count = 0; open8_vm_ccall_count = 0;
 #endif
     if (g_log_first) pd->system->logToConsole("open8: frame1 update ok");
     uint32_t t1 = pd_shim_ticks();
     core_pd_draw();
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_LOAD
     di = open8_vm_instr_count; dc = open8_vm_ccall_count;
 #endif
     if (g_log_first) pd->system->logToConsole("open8: frame1 draw ok");
@@ -240,7 +239,7 @@ static int update(void* userdata)
     float    fps       = pd->display->getFPS();
 
     int skip = 0;
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_TOOLS
     skip = open8_profile_skip_fill;
 #endif
 
@@ -269,6 +268,7 @@ static int update(void* userdata)
     if (now_ms - last_log_ms >= 1000)
     {
         last_log_ms = now_ms;
+#ifdef OPEN8_PROFILE_LOAD
         pd->system->logToConsole("cart=%s nofill=%d gcoff=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus  | upd[i=%lu c=%lu] drw[i=%lu c=%lu]",
                                  g_carts[g_cart_index].name, skip, g_gc_off,
                                  (int)(fps + 0.5f),
@@ -277,6 +277,14 @@ static int update(void* userdata)
                                  (unsigned long)us_blit,
                                  (unsigned long)ui, (unsigned long)uc,
                                  (unsigned long)di, (unsigned long)dc);
+#else
+        pd->system->logToConsole("cart=%s  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus",
+                                 g_carts[g_cart_index].name,
+                                 (int)(fps + 0.5f),
+                                 (unsigned long)us_update,
+                                 (unsigned long)us_draw,
+                                 (unsigned long)us_blit);
+#endif
     }
 
     return 1;
@@ -314,13 +322,15 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
             boot_cart(0);
         }
 
-        /* System menu: pick a test cart, and toggle the t_draw fill probe. */
+        /* System menu: pick a test cart; diagnostic probes are opt-in builds. */
         PDMenuItem* cart_item =
             pd->system->addOptionsMenuItem("cart", g_cart_titles, NUM_CARTS, cart_menu_cb, NULL);
         pd->system->setMenuItemUserdata(cart_item, cart_item);
+#ifdef OPEN8_PROFILE_TOOLS
         PDMenuItem* skip_item =
             pd->system->addCheckmarkMenuItem("no fill", 0, skipfill_menu_cb, NULL);
         pd->system->setMenuItemUserdata(skip_item, skip_item);
+#endif
         PDMenuItem* gc_item =
             pd->system->addCheckmarkMenuItem("gc off", 0, gc_menu_cb, NULL);
         pd->system->setMenuItemUserdata(gc_item, gc_item);

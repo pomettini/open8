@@ -4,6 +4,7 @@
 !CMakeLists.txt
 !CMakeSettings.json
 out
+tests
 *.dll
 *.exe
 *.ilk

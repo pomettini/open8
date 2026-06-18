@@ -601,7 +601,7 @@ void luaV_finishOp (lua_State *L) {
 #define vmcasenb(l,b)	case l: {b}		/* nb = no break */
 #endif
 
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_LOAD
 /* Phase 2 load characterizer: bytecode instructions and C-function calls
  * executed, read+reset per phase by pd_main. This inflates VM timing in the
  * profile build (one global increment per opcode) — read the *counts*, not the
@@ -1031,4 +1031,3 @@ void luaV_execute (lua_State *L) {
   }
 #endif
 }
-

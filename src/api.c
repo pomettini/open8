@@ -42,7 +42,7 @@ uint32_t pico8_frame_ms = 0;
 // Touch button state (when SDL_HINT_MOUSE_TOUCH_EVENTS is used).
 uint8_t touch_button_state = 0;
 
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_TOOLS
 // Profiling: when set, the dominant blitters return immediately. Comparing
 // t_draw with this on vs off splits C-side pixel fill from VM call overhead.
 // See docs/playdate-port.md. Toggled from pd_main via a system menu item.
@@ -2029,8 +2029,9 @@ static int pico8_all_iter(lua_State* L)
     lua_settop(L, 0);
     lua_pushvalue(L, lua_upvalueindex(1));
     int index = fix32_to_int(lua_tointeger(L, lua_upvalueindex(2)));
+    int len = fix32_to_int(lua_tointeger(L, lua_upvalueindex(3)));
 
-    while (1)
+    while (index < len)
     {
         index++;
         lua_pushinteger(L, index);
@@ -2042,12 +2043,8 @@ static int pico8_all_iter(lua_State* L)
             return 1;
         }
         lua_pop(L, 1);
-
-        if ((size_t)index > lua_rawlen(L, 1))
-        {
-            return 0;
-        }
     }
+    return 0;
 }
 
 static int pico8_all(lua_State* L)
@@ -2059,7 +2056,7 @@ static int pico8_all(lua_State* L)
      * original table while iterating, matching PICO-8 semantics.
      * The copy packs non-nil values into a new dense table. */
     size_t len = lua_rawlen(L, 1);
-    lua_newtable(L); /* copy table */
+    lua_createtable(L, (int)len, 0); /* pre-sized snapshot table */
     int copy_index = lua_gettop(L);
 
     size_t dest = 0;
@@ -2077,10 +2074,11 @@ static int pico8_all(lua_State* L)
         }
     }
 
-    /* Push the snapshot and an initial index 0 as upvalues for the iterator. */
+    /* Cache the snapshot length too, avoiding lua_rawlen() on every iteration. */
     lua_pushvalue(L, copy_index); /* push copy */
     lua_pushinteger(L, 0);
-    lua_pushcclosure(L, pico8_all_iter, 2);
+    lua_pushinteger(L, (int)dest);
+    lua_pushcclosure(L, pico8_all_iter, 3);
 
     /* remove the temporary copy table left on the stack so only the
      * iterator closure remains as the return value */

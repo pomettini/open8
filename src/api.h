@@ -28,10 +28,10 @@ typedef struct
 extern fix32_t seconds_since_start;
 
 // Frame timing information (set by core.c each frame) used by stat(1).
-extern uint64_t pico8_frame_start;
+extern uint32_t pico8_frame_start;
 extern uint32_t pico8_frame_ms;
 
-#ifdef OPEN8_PLATFORM_PLAYDATE
+#ifdef OPEN8_PROFILE_TOOLS
 // Profiling toggle: when non-zero, the dominant blitters (cls/spr/sspr/map/
 // rectfill/circfill/line/pset) early-return. Set from pd_main to split t_draw
 // into C-side fill vs VM call overhead. See docs/playdate-port.md.

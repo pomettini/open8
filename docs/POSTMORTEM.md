@@ -1,144 +1,138 @@
-# open8 on Playdate — Postmortem
+# open8 on Playdate — Corrected postmortem
 
-A retrospective on porting open8 (a portable PICO-8 player) to the Panic
-Playdate, and the performance investigation that followed. Companion to the
-running log in [playdate-port.md](playdate-port.md).
+A retrospective on porting open8, a portable PICO-8 player, to the Panic
+Playdate. The chronological experiment record lives in
+[playdate-port.md](playdate-port.md).
 
 ## Goal
 
-Run a PICO-8 player on the Playdate (STM32F746 Cortex-M7 @168 MHz, 16 KB I/D
-cache, 400×240 1-bit display) at "full native speed for as many carts as
-possible," reusing open8's z8lua VM + graphics API rather than writing a player
-from scratch.
+Run PICO-8 carts on the Playdate's STM32F746 Cortex-M7 at native speed where
+possible, while preserving PICO-8's fixed-point semantics and reusing open8's
+z8lua VM and graphics API.
 
 ## Outcome
 
-A working player: boots `.p8.png` carts, runs the z8lua VM, renders to the 1-bit
-display, takes input, and now has audio and persistent-data support. **The
-performance ceiling is a hard hardware wall** — light carts hold 30 fps; complex
-carts (Celeste, Jelpi) sit at ~6–13 fps — and that wall was identified, proven,
-and shown to be unmovable from software. The display and input paths are
-complete; the lasting engineering asset is an **always-on measurement harness**
-that turned every performance question into a single device experiment.
+The port boots embedded `.p8.png` carts, runs z8lua, renders to the 1-bit
+display, handles input, synthesizes audio, and supports in-memory cart data.
+
+The original postmortem incorrectly declared a 6–13 fps hardware ceiling. The
+device build had an empty `CMAKE_BUILD_TYPE` and no compiler optimization flag.
+After correcting the build and removing production profiling overhead, Celeste
+gameplay rose from 10–13 fps to 17–19 fps; its title holds 30 fps.
+
+This is not yet the 30 fps target, but it changes the problem from an alleged
+hardware impossibility into an active optimization task with roughly another
+1.5× needed for Celeste.
 
 ## What shipped
 
-- **Playdate backend** (`platform/playdate/`): an SDL3 compatibility shim lets
-  open8's SDL-free core (api.c, core.c, memory.c, z8lua, …) compile unchanged;
-  the root SDL build is untouched. Input routes through the gamepad shim so
-  `btn`/`btnp` work as-is.
-- **1-bit display**: native threshold blit of the 4bpp framebuffer (`0x6000`) to
-  the 400×240 frame at 1:1, ~3.7 ms/frame and rock-stable.
-- **Embedded test carts** (Celeste/Jelpi/Racer/Picross) switchable via the
-  system menu, sidestepping on-device file I/O and pdc's PNG conversion.
-- **Profiler**: per-component frame timing (update / draw / blit) + a load
-  characterizer (bytecode + C-call counts) on an on-device HUD and serial.
-- **Correctness**: `cartdata`/`dget`/`dset` (fixes Racer's nil crash); a
-  PICO-8 audio synth (4 channels, standard waveforms, SFX + basic music).
+- A Playdate backend and SDL compatibility shim under `platform/playdate/`.
+- A native centered 128×128, 4bpp-to-1bpp display path.
+- Four embedded test carts: Celeste, Jelpi, Racer, and Picross.
+- On-device update/draw/blit timing through the supported elapsed-time API.
+- Opt-in skip-fill and VM load-characterization probes.
+- Input, basic SFX/music synthesis, and in-memory `cartdata`/`dget`/`dset`.
 
-## The investigation — how the bottleneck was found
+## The invalid baseline
 
-The hardware brief predicted the wall would be "non-obvious… D-cache misses on
-the working data set, not the interpreter hot loop." That turned out to be
-exactly right, but it took five experiments to prove it and, crucially, to rule
-out the tempting cheap fixes. Each was built behind a compile flag, validated for
-correctness, device-measured, and kept or reverted on the number.
+The documented device command configured a single-config Unix Makefiles build
+without `-DCMAKE_BUILD_TYPE=Release`. The generated cache and flags showed:
 
-| # | Hypothesis | Experiment | Result |
-|---|---|---|---|
-| 0 | — | Boot + per-component timing | Baseline: draw 46 ms, update 35 ms (spiky), blit 3.7 ms |
-| 1 | Fill-rate / blit | skip-fill probe (C blit vs VM split) | **Blit is ~3.7 ms flat; VM dominates.** Not the blitter. |
-| 2 | Interpreter dispatch | computed-goto threading | **Regressed** (I-cache bloat). Dispatch isn't the cost. |
-| 3 | Bytecode volume | instruction + C-call counters | Counts tiny (~0.5–4 ms of real interpretation). Not volume. |
-| 4 | Garbage collector | GC-off toggle | **No change at all.** Not GC. |
-| 5 | Heap placement | arena allocator (locality) | **No change.** Not placement. |
+```text
+CMAKE_BUILD_TYPE:STRING=
+CMAKE_C_FLAGS:STRING=
+C_FLAGS = ... -mcpu=cortex-m7 ...    # no -O option
+```
 
-### The verdict
+Consequences included:
 
-By elimination plus two positive signals, the cost is **memory latency on the
-cart's data working set**:
+- ninety out-of-line copies of nominally `static inline` fixed-point helpers;
+- excessive stack loads/stores around Lua and C API calls;
+- a 31% larger `luaV_execute`;
+- inflated graphics loops and table operations;
+- misleading comparisons between interpreter work, C calls, and wall time.
 
-- Per-bytecode-instruction wall time is ~1,800–2,900 cycles where the op itself
-  is ~10–30 cycles — the rest is stalls.
-- **Per-instruction cost scales with heap size** (Celeste's 114 KB heap → ~17
-  µs/instr; Jelpi's 51 KB → ~11 µs/instr). The smoking gun for cache-miss-bound
-  execution.
+The earlier “1,800–2,900 cycles per bytecode instruction” calculation was not a
+cache-latency measurement. It divided total phase time—including C calls,
+graphics work, allocation and profiler writes—by bytecode count in an `-O0`
+binary.
 
-The cart's tables/objects (51–114 KB) far exceed the 16 KB D-cache, live in
-external RAM, and are accessed by pointer-chasing the *cart* defines — none of
-which we can change. DTCM has only ~8 KB free, so the heap can't be relocated to
-fast memory, and the MPU/cacheability isn't game-controllable.
+## Corrected production build
 
-## What worked
+The Playdate project now defaults single-config generators to Release and makes
+expensive diagnostics opt-in:
 
-- **Measure-don't-assume, behind flags.** Every optimization was a falsifiable
-  experiment with a revert path. This is what kept a wrong hypothesis (GC) from
-  becoming wasted days — it cost one toggle and one serial read.
-- **Host differential testing for risky VM changes.** Before trusting the
-  computed-goto rewrite and the custom allocator on hardware, we compiled z8lua
-  standalone and diffed output against the stock build under heavy churn.
-  Byte-identical → correctness settled before the device round-trip.
-- **The SDL shim** kept the upstream SDL build and ~10 existing platforms intact
-  while the Playdate backend reused the exact same core.
-- **The display strategy** was right on the first try and never needed revisiting
-  (blit stayed ~3.7 ms through every experiment).
+- `OPEN8_PROFILE_LOAD=OFF`: no global write on every opcode/C call.
+- `OPEN8_PROFILE_TOOLS=OFF`: no skip-fill branch in every major drawing call.
+- `OPEN8_ARENA_ALLOCATOR=OFF`: no experimental 4 MB arena.
 
-## What didn't (and why it was still valuable)
+`all()` also pre-sizes its mutation-safe snapshot and caches the snapshot length
+inside the iterator. The complete host suite passes, including mutation during
+`all()` iteration.
 
-- **Computed-goto VM dispatch — regressed.** Token threading bloats the
-  interpreter past the I-cache; on Cortex-M that penalty isn't offset because
-  dispatch wasn't the bottleneck. Lesson: the same architecture that punished
-  this would punish a packed-TValue (unaligned byte access) — so we *didn't*
-  attempt the footprint-shrink surgery that the "deep VM work" instinct
-  suggested. A measured null result steered us away from a predictable second
-  regression.
-- **GC tuning — no effect.** The intuitive culprit (Celeste's 800 ms hitches
-  *looked* like collections) was wrong; stopping the collector changed nothing
-  and the hitches persisted. Cheap to disprove.
-- **Arena allocator — no effect.** Object placement doesn't matter when the
-  access *pattern* is the problem.
-- **"Use the Playdate's built-in Lua"** (a good question) — blocked three ways:
-  no runtime source loading in the C API, wrong (non-fixed-point) semantics and
-  syntax, and it targets interpreter *code* when the cost is *data*. It would
-  optimize the part that's already fast.
+Static ARM comparison:
 
-## Lessons
+| property | unoptimized baseline | corrected Release |
+|---|---:|---:|
+| ELF text | 237,776 B | 186,240 B |
+| `luaV_execute` | 8,052 B | 5,548 B |
+| emitted `fix32_*` helpers | 90 | 0 |
 
-1. **Trust the cache prediction, but prove it by elimination.** "It's probably
-   D-cache" was correct on day one, yet the value was in *ruling out* blit,
-   dispatch, bytecode, GC, and placement — because each is a plausible cheap win
-   someone would otherwise chase.
-2. **On Cortex-M, code size and unaligned access are first-class costs.** Two
-   classic desktop wins (computed-goto, packed structs) are net losses here.
-3. **A null result is a result.** Four of five experiments "failed" and together
-   they're the proof of the conclusion.
-4. **Build the instrument first.** The profiler/harness paid for itself many
-   times over and outlives the port.
-5. **Interpreter performance on cache-bound workloads is a data-layout problem,
-   not an interpreter problem.** The carts' own data structures set the ceiling.
+The Playdate SDK appends `-O2`, making it the effective optimization level.
 
-## Current state & realistic envelope
+## Corrected device measurements
 
-- Boots and runs PICO-8 carts; display, input, audio, persistent data working.
-- 30 fps for light carts; ~6–13 fps for heavy ones (Celeste, Jelpi). This is the
-  hardware ceiling, not a missing optimization.
-- Audio is a functional core (SFX + basic music); tempo/mix constants and the
-  fancier instruments/effects likely want on-device tuning.
+| cart | phase | fps | update | draw | final blit |
+|---|---|---:|---:|---:|---:|
+| Celeste | title/menu | 30 | ~1.2–1.5 ms | ~12–13 ms | ~1.2–1.3 ms |
+| Celeste | gameplay | **17–19** | ~14–23 ms | ~26–30 ms | ~1.2 ms |
 
-## If someone picks this up
+The aggregate Release build includes compiler optimization, production probes
+being compiled out, the stock allocator, and the `all()` improvement. Their
+individual contributions have not yet been isolated, so the gain should not be
+attributed to one sub-change without another device experiment.
 
-- **Accept the envelope and broaden compatibility**: implement remaining stubs
-  (`menuitem`, music fades/effects), a real cart browser via `pd->file`, on-disk
-  `cartdata` persistence.
-- **Audio polish**: tune tempo/pitch/mix on-device; finish the note effects
-  (slide/vibrato/arp) and tilted-saw/organ/phaser instruments; double-buffer the
-  synth state to remove the game/audio-thread race.
-- **Only if you must chase fps**: the sole remaining lever is shrinking the cart
-  *data* working set inside z8lua (a parallel-tag / SoA value representation to
-  beat the 8 B TValue), which is high-risk surgery against the NaN-trick layout
-  with an uncertain payoff that likely still exceeds the 16 KB cache. The honest
-  expectation is diminishing returns.
+## What remains valid from the first investigation
 
-The harness makes all of these measurable. Start by reading
-[playdate-port.md](playdate-port.md) — it has every experiment, including the
-failures and the reasons.
+- Raw DWT register access faults because Playdate game code is unprivileged.
+- The final framebuffer conversion is stable and no longer a leading cost.
+- The built-in Playdate Lua runtime cannot load arbitrary cart source and does
+  not implement PICO-8's fixed-point language semantics.
+- Keeping experiments behind flags and validating VM changes on the host is
+  still the right workflow.
+
+## What must be retested
+
+Computed-goto dispatch, GC-off, arena allocation, skip-fill ratios, and the
+load-characterizer conclusions were all measured against `-O0`. Their relative
+numbers remain historical observations, not reliable architectural conclusions.
+In particular, the prior claim that cart-defined D-cache misses formed an
+unmovable wall is retracted.
+
+## Next step
+
+Re-run only the coarse fill split against Release:
+
+```sh
+cmake -S platform/playdate -B platform/playdate/build-profile \
+  -G "Unix Makefiles" \
+  -DCMAKE_TOOLCHAIN_FILE="$PLAYDATE_SDK_PATH/C_API/buildsupport/arm.cmake" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DOPEN8_PROFILE_TOOLS=ON \
+  -DOPEN8_PROFILE_LOAD=OFF \
+  -DOPEN8_ARENA_ALLOCATOR=OFF
+cmake --build platform/playdate/build-profile
+```
+
+Measure full and no-fill frames for all four carts:
+
+- If Celeste's no-fill total is at or below 33 ms, graphics is the path to 30
+  fps: optimize `map()`/`spr()` and packed framebuffer writes.
+- If no-fill remains well above budget, add coarse timers/counters around API
+  categories such as table iteration, math, input and drawing. Avoid per-opcode
+  writes while collecting timing.
+- `all()` is the first API-level suspect because Celeste repeatedly iterates
+  object lists and the current mutation-safe semantics still require a snapshot.
+
+Only after this corrected split should computed-goto, GC behavior, or allocator
+placement be reconsidered.
