@@ -1204,6 +1204,45 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
         color_map[i] = pico8_ram[0x5f00 + i];
     }
 
+    // Fast path: no flip and an even destination x. Source and destination
+    // nibbles then align, so we read one source byte and (for two opaque pixels)
+    // write one destination byte with no read-modify-write. This is the common
+    // case for map() tiles — the dominant fill — and unflipped sprites. dx_start
+    // and dx_end are both even here (x and the sprite width are even), so every
+    // iteration has both pixels in range. Flips / odd x fall through below.
+    if (!flip_x && !flip_y && ((x & 1) == 0))
+    {
+        for (int32_t dy = dy_start; dy < dy_end; dy++)
+        {
+            uint16_t sprite_row_addr = sprite_y_base + ((uint16_t)dy << 6) + sprite_x_base;
+            uint16_t screen_row_addr = 0x6000 + ((uint16_t)(y + dy) << 6);
+
+            for (int32_t dx = dx_start; dx < dx_end; dx += 2)
+            {
+                uint8_t sbyte = pico8_ram[sprite_row_addr + ((uint16_t)dx >> 1)];
+                uint8_t pal_lo = color_map[sbyte & 0x0F];
+                uint8_t pal_hi = color_map[(sbyte >> 4) & 0x0F];
+                uint8_t* d = &pico8_ram[screen_row_addr + ((uint16_t)(x + dx) >> 1)];
+
+                int op_lo = !(pal_lo & 0x10);
+                int op_hi = !(pal_hi & 0x10);
+                if (op_lo && op_hi)
+                {
+                    *d = (uint8_t)((pal_lo & 0x0F) | ((pal_hi & 0x0F) << 4));
+                }
+                else if (op_lo)
+                {
+                    *d = (uint8_t)((*d & 0xF0) | (pal_lo & 0x0F));
+                }
+                else if (op_hi)
+                {
+                    *d = (uint8_t)((*d & 0x0F) | ((pal_hi & 0x0F) << 4));
+                }
+            }
+        }
+        return;
+    }
+
     for (int32_t dy = dy_start; dy < dy_end; dy++)
     {
         int32_t sy = flip_y ? (height - 1 - dy) : dy;

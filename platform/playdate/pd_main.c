@@ -57,15 +57,18 @@ static void init_cart_registry(void)
     for (int i = 0; i < NUM_CARTS; i++) g_cart_titles[i] = g_carts[i].name;
 }
 
-/* PICO-8 screen is 128x128; centre it in the 400x240 frame. 136 and 56 keep the
- * region byte-aligned (136 = 17*8, 128 = 16*8) so each output byte is built from
- * exactly 8 source pixels with no straddle. */
-#define SCREEN_W      128
-#define SCREEN_H      128
-#define DEST_X        136
-#define DEST_Y        56
-#define DEST_BYTE_X   (DEST_X / 8)   /* 17 */
-#define DEST_BYTES    (SCREEN_W / 8) /* 16 */
+/* PICO-8's 128x128 is nearest-neighbour upscaled to a SCALE_W x SCALE_H square,
+ * centred in the 400x240 frame, with ordered (Bayer 4x4) dithering so the 16
+ * PICO-8 colours render as brightness patterns on the 1-bit display. DEST_X is a
+ * multiple of 8 so each output byte is exactly 8 packed pixels with no straddle. */
+#define SRC_W         128
+#define SRC_H         128
+#define SCALE_W       200
+#define SCALE_H       200
+#define DEST_X        96            /* byte-aligned: 96/8 = 12 */
+#define DEST_Y        20            /* (240 - 200) / 2 */
+#define DEST_BYTE_X   (DEST_X / 8)  /* 12 */
+#define DEST_BYTES    (SCALE_W / 8) /* 25 */
 
 #define FB_BASE       0x6000
 #define DISP_PALETTE  0x5f10
@@ -74,21 +77,36 @@ static PlaydateAPI* g_pd  = NULL;
 static LCDFont*     g_font = NULL;
 static int          g_booted = 0;
 
-/* Final-colour (0..15) -> 1-bit. Keyed by the post-display-palette colour, so it
- * stays valid regardless of pal() remapping. Milestone 1 = plain luminance
- * threshold; ordered dithering is Phase 1. */
-static uint8_t g_threshold[16];
+/* dither[final colour 0..15][bayer cell 0..15] -> 1-bit pixel. Built from the 16
+ * fixed PICO-8 colour luminances and keyed by the post-display-palette colour,
+ * so it stays correct under pal(). Nearest-neighbour scale tables map dest->src. */
+static uint8_t g_dither[16][16];
+static uint8_t g_sx[SCALE_W];
+static uint8_t g_sy[SCALE_H];
 
-static void build_threshold_lut(void)
+static void build_display_tables(void)
 {
-    for (int i = 0; i < 16; i++)
+    /* Standard recursive 4x4 Bayer matrix (same ordered-dither family as Nofrendo). */
+    static const uint8_t bayer[16] = {
+        0,  8,  2, 10,
+       12,  4, 14,  6,
+        3, 11,  1,  9,
+       15,  7, 13,  5
+    };
+    for (int c = 0; c < 16; c++)
     {
         uint8_t r, g, b;
-        color_lookup(i, &r, &g, &b);
-        /* Rec.601-ish luminance. Playdate: bit 1 = white, 0 = black. */
-        uint32_t lum = (54u * r + 183u * g + 19u * b) >> 8;
-        g_threshold[i] = (lum >= 128) ? 1 : 0;
+        color_lookup(c, &r, &g, &b);
+        /* Rec.601-ish luminance 0..255. Playdate: bit 1 = white. */
+        int lum = (int)((54u * r + 183u * g + 19u * b) >> 8);
+        for (int k = 0; k < 16; k++)
+        {
+            int threshold = bayer[k] * 16 + 8; /* 8, 24, ... 248 */
+            g_dither[c][k] = (lum > threshold) ? 1 : 0;
+        }
     }
+    for (int d = 0; d < SCALE_W; d++) g_sx[d] = (uint8_t)(d * SRC_W / SCALE_W);
+    for (int d = 0; d < SCALE_H; d++) g_sy[d] = (uint8_t)(d * SRC_H / SCALE_H);
 }
 
 static void blit_framebuffer(void)
@@ -96,28 +114,31 @@ static void blit_framebuffer(void)
     uint8_t* frame = g_pd->graphics->getFrame();
     const uint8_t* disp = &pico8_ram[DISP_PALETTE];
 
-    for (int py = 0; py < SCREEN_H; py++)
+    for (int dy = 0; dy < SCALE_H; dy++)
     {
-        const uint8_t* src  = &pico8_ram[FB_BASE + (py << 6)];
-        uint8_t*       drow = frame + (DEST_Y + py) * LCD_ROWSIZE + DEST_BYTE_X;
+        const uint8_t* src  = &pico8_ram[FB_BASE + ((uint16_t)g_sy[dy] << 6)];
+        uint8_t*       drow = frame + (DEST_Y + dy) * LCD_ROWSIZE + DEST_BYTE_X;
+        int            bayer_row = (dy & 3) << 2;
 
         for (int bx = 0; bx < DEST_BYTES; bx++)
         {
             uint8_t out = 0;
-            /* 8 horizontal pixels = 4 source bytes (2 px each). */
-            for (int k = 0; k < 4; k++)
+            int dx0 = bx << 3;
+            for (int k = 0; k < 8; k++)
             {
-                uint8_t s  = src[(bx << 2) + k];
-                uint8_t c0 = g_threshold[disp[s & 0x0F] & 0x0F]; /* even/left pixel  */
-                uint8_t c1 = g_threshold[disp[s >> 4]   & 0x0F]; /* odd/right pixel  */
-                out |= (uint8_t)(c0 << (7 - (k << 1)));
-                out |= (uint8_t)(c1 << (6 - (k << 1)));
+                int     dx  = dx0 + k;
+                uint8_t sx  = g_sx[dx];
+                uint8_t s   = src[sx >> 1];
+                uint8_t nib = (sx & 1) ? (s >> 4) : (s & 0x0F);
+                uint8_t col = disp[nib] & 0x0F;                 /* post-display-palette colour */
+                uint8_t bit = g_dither[col][bayer_row + (dx & 3)];
+                out |= (uint8_t)(bit << (7 - k));
             }
             drow[bx] = out;
         }
     }
 
-    g_pd->graphics->markUpdatedRows(DEST_Y, DEST_Y + SCREEN_H - 1);
+    g_pd->graphics->markUpdatedRows(DEST_Y, DEST_Y + SCALE_H - 1);
 }
 
 /* Playdate sound source: mono synth -> left buffer. Runs on the audio thread. */
@@ -353,8 +374,8 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
         init_cart_registry();
         pd->system->logToConsole("open8: [1] init, shim ready");
 
-        build_threshold_lut();
-        pd->system->logToConsole("open8: [2] threshold lut built");
+        build_display_tables();
+        pd->system->logToConsole("open8: [2] display tables built (200x200 + dither)");
 
         const char* err = NULL;
         g_font = pd->graphics->loadFont("/System/Fonts/Asheville-Sans-14-Bold.pft", &err);
