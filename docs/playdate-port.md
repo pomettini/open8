@@ -53,14 +53,14 @@ Current implementation:
 
 Current bounded costs from the latest valid captures:
 
-- DTCM Celeste update: **21.13 ms median** in stable gameplay;
-- DTCM Celeste full draw: **18.04 ms median**;
+- DTCM VM+table Celeste update: **15.65 ms median** in stable gameplay;
+- DTCM VM+table Celeste full draw: **13.16 ms median**;
 - Celeste no-fill draw: roughly 14.1 ms with the packed sprite path;
 - original 240×240 per-pixel scaler: 10.60 ms;
 - first 32 KiB scaler LUT: 23.3–23.9 ms, rejected;
 - compact 4 KiB scaler LUT: **~2 ms median**, accepted;
-- DTCM per-sample summed frame: **40.90 ms median / 23 fps**;
-- remaining median gap to 30 fps: roughly **7.6–8.3 ms**;
+- DTCM VM+table per-sample summed frame: **30.97 ms median / 28 fps**;
+- 70% of captured gameplay samples fit the 33.3 ms frame budget;
 - 30 fps frame budget: 33.3 ms.
 
 ### Corrected production configuration
@@ -1036,11 +1036,12 @@ Earlier stable readings were `0x20009580` (2,944 bytes) and
 `0x200095b8` (3,000 bytes). This closes the dynamic stack-safety gate for the
 current device, firmware, SDK, and build layout.
 
-#### Guarded executable DTCM VM — device result, ACCEPTED
+#### Guarded executable DTCM VM core — device result, ACCEPTED
 
-`OPEN8_VM_DTCM_EXEC` performs the first executable test. It keeps the original
-interpreter in external memory and routes public `luaV_execute()` calls through
-a function pointer. After the initial cart has booted, the build:
+The first `OPEN8_VM_DTCM_EXEC` configuration performed the executable-core test.
+It kept the original interpreter in external memory and routed public
+`luaV_execute()` calls through a function pointer. After the initial cart had
+booted, the build:
 
 - copies only the compact, long-call `luaV_execute` implementation with a
   cacheable-source/volatile-destination 32-bit loop;
@@ -1109,24 +1110,91 @@ corrects the earlier interpretation that interpreter instruction fetch was too
 small to matter: dispatch style still is not the answer, but placing the compact
 dispatch core in zero-wait executable memory is decisively valuable.
 
-The remaining median gap to a 33.3 ms frame is roughly **7.6–8.3 ms**. The next
-bounded DTCM experiment should relocate `luaV_gettable` and `luaV_settable`
-alongside the interpreter. Their linked source bodies total only 580 bytes and
-serve five table-related opcodes plus public API table access. Use explicit
-source/relocated function pointers, not heuristic literal-pool rewriting, so
-guard fallback can restore every entry safely. The resulting block should remain
-near 4.5 KB, keep the proven `0x20008a00` pool top unchanged, preserve the full
-2,928-byte measured stack margin, and retain roughly 0.9 KB above the known
-firmware-data floor. Benchmark it strictly against this accepted DTCM-core build.
+The remaining median gap to a 33.3 ms frame is roughly **7.6–8.3 ms**.
 
-If that helper bundle does not remove at least another 1–2 ms, stop expanding
-the VM block and return to the measured ~6.3 ms C graphics-fill path. A useful
-helper win plus the remaining graphics work is now a plausible route to 30 fps;
-neither is guaranteed to close the budget alone.
+#### Guarded DTCM VM plus table helpers — device result, ACCEPTED
 
-The executable-DTCM package was copied to the Playdate, byte-verified, and
-safely ejected on 2026-06-19. It was not launched automatically and the host did
-not attach to or read the device console.
+The next bounded build extends the copied block with `luaV_gettable` and
+`luaV_settable`. They serve five table-related bytecode handlers plus public API
+table access. Their public symbols remain small external-memory trampolines
+through independent function pointers, so no literal-pool rewriting is needed:
+activation installs the two helper entries before the VM entry, while fallback
+restores the source VM entry first and then both helpers.
+
+The full host suite passes through the new indirect helper entries. Static ARM
+verification shows:
+
+- source block: `0x000013c0–0x00002530`, **4,464 bytes**;
+- compact helper bodies:
+  - `luaV_gettable`: 268 bytes at `0x000013c0`;
+  - `luaV_settable`: 276 bytes at `0x000014e0`;
+  - compact VM core: 3,880 bytes at `0x00001600`;
+- DTCM copy: `0x20007880–0x200089f0`;
+- DTCM entries:
+  - VM: `0x20007ac1`;
+  - gettable: `0x20007881`;
+  - settable: `0x200079a1`;
+- low/high canaries: `0x20007870` and `0x20008a00`;
+- all 56 block fixups remain in the normal `.rel.text` stream;
+- every helper outbound call is a relocated literal load plus `blx`;
+- the low canary remains **928 bytes** above the known firmware-data floor;
+- the high canary preserves the full **2,928-byte** measured stack margin.
+
+The package marker is `compact 4K LUT + DTCM VM+table`. The manually supplied
+capture confirmed exact activation:
+
+```text
+open8: DTCM VM+table active src=600013c0..60002530
+  dst=20007880..200089f0 size=4464
+  entries=20007ac1/20007881/200079a1
+  guards=20007870/20008a00
+```
+
+No `disabled` or `guard touched` line appeared. Excluding the four title/menu
+samples, 40 Celeste gameplay samples produced:
+
+| metric | VM+table DTCM median | 10th–90th percentile |
+|---|---:|---:|
+| measured fps | **28** | 26–30 |
+| update | **15.65 ms** | 9.11–21.38 ms |
+| draw | **13.16 ms** | 12.04–15.69 ms |
+| blit | **1.97 ms** | 1.86–2.64 ms |
+| per-sample summed frame | **30.97 ms** | 27.23–37.91 ms |
+
+The component-median sum is 30.77 ms. Twenty-eight of 40 samples (**70%**) fit
+inside the 33.3 ms frame budget. The displayed FPS reaches 30 repeatedly and has
+a median of 28, so the project has reached the 30 fps target on median CPU frame
+work; the remaining problem is consistency during heavier gameplay frames.
+
+Compared with the accepted core-only DTCM capture:
+
+| build | update | draw | blit | per-sample frame | fps |
+|---|---:|---:|---:|---:|---:|
+| DTCM VM core | 21.13 ms | 18.04 ms | 2.42 ms | 40.90 ms | 23 |
+| DTCM VM + table helpers | **15.65 ms** | **13.16 ms** | **1.97 ms** | **30.97 ms** | **28** |
+
+The helper bundle saves another **9.92 ms/frame (24%)** in this capture,
+including about 5.49 ms in update and 4.89 ms in draw. Some scene variance is
+unavoidable, but the magnitude, simultaneous update/draw improvement, repeated
+30 fps samples, and tester report that it “plays very good” make this a clear
+accept rather than noise.
+
+Against the earlier clean production baseline's 49.73 ms component-median sum,
+the current 30.77 ms sum is about **18.96 ms/frame faster (38%)**.
+
+Do not grow the DTCM block further without a new lower-memory probe: only
+928 bytes remain above the vecx-observed firmware-data floor. The next
+performance work should return to the measured C graphics-fill path, aiming to
+remove enough of its remaining cost to keep the 90th-percentile frame below
+33.3 ms. The target is no longer higher peak FPS; it is stable 30 fps.
+
+This VM+table package was copied to the Playdate, byte-verified, and safely
+ejected on 2026-06-19. It was not launched automatically and the host did not
+attach to or read the device console.
+
+The earlier core-only executable-DTCM package was likewise copied,
+byte-verified, and safely ejected on 2026-06-19 without automatic launch or
+host console access.
 
 Do not move the Lua heap or compact scaler LUT to DTCM merely because it is
 faster memory: vecx measured a regression when cache-resident hot data gained a

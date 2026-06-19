@@ -23,7 +23,11 @@ static int g_fallback_reported;
 extern uintptr_t open8_vm_hot_start_address(void);
 extern uintptr_t open8_vm_hot_end_address(void);
 extern uintptr_t open8_vm_execute_source_address(void);
-extern void open8_vm_use_relocated(uintptr_t address);
+extern uintptr_t open8_vm_gettable_source_address(void);
+extern uintptr_t open8_vm_settable_source_address(void);
+extern void open8_vm_use_relocated(uintptr_t execute_address,
+                                   uintptr_t gettable_address,
+                                   uintptr_t settable_address);
 extern void open8_vm_use_original(void);
 
 static void write_guard(volatile uint32_t* guard)
@@ -55,13 +59,23 @@ int open8_dtcm_exec_init(PlaydateAPI* pd)
     const uintptr_t source_start = open8_vm_hot_start_address();
     const uintptr_t source_end = open8_vm_hot_end_address();
     const uintptr_t source_size = source_end - source_start;
-    const uintptr_t source_entry = open8_vm_execute_source_address();
-    const uintptr_t source_code = source_entry & ~(uintptr_t)1u;
-    const uintptr_t entry_offset = source_code - source_start;
+    const uintptr_t source_execute = open8_vm_execute_source_address();
+    const uintptr_t source_gettable = open8_vm_gettable_source_address();
+    const uintptr_t source_settable = open8_vm_settable_source_address();
+    const uintptr_t execute_code = source_execute & ~(uintptr_t)1u;
+    const uintptr_t gettable_code = source_gettable & ~(uintptr_t)1u;
+    const uintptr_t settable_code = source_settable & ~(uintptr_t)1u;
     const uintptr_t destination =
         (OPEN8_DTCM_POOL_TOP - source_size) & ~(OPEN8_DTCM_ALIGN - 1u);
-    const uintptr_t destination_entry =
-        destination + entry_offset + (source_entry & (uintptr_t)1u);
+    const uintptr_t destination_execute =
+        destination + (execute_code - source_start) +
+        (source_execute & (uintptr_t)1u);
+    const uintptr_t destination_gettable =
+        destination + (gettable_code - source_start) +
+        (source_gettable & (uintptr_t)1u);
+    const uintptr_t destination_settable =
+        destination + (settable_code - source_start) +
+        (source_settable & (uintptr_t)1u);
     const uint32_t* src;
     volatile uint32_t* dst;
     uintptr_t words;
@@ -74,17 +88,20 @@ int open8_dtcm_exec_init(PlaydateAPI* pd)
 
     if (source_end <= source_start ||
         (source_size & (uintptr_t)3u) != 0 ||
-        source_code < source_start ||
-        source_code >= source_end ||
+        execute_code < source_start || execute_code >= source_end ||
+        gettable_code < source_start || gettable_code >= source_end ||
+        settable_code < source_start || settable_code >= source_end ||
         destination < OPEN8_DTCM_FIRMWARE_FLOOR + OPEN8_DTCM_GUARD_BYTES)
     {
         pd->system->logToConsole(
-            "open8: DTCM VM disabled: invalid layout src=%08lx..%08lx size=%lu dst=%08lx entry=%08lx",
+            "open8: DTCM VM disabled: invalid layout src=%08lx..%08lx size=%lu dst=%08lx entries=%08lx/%08lx/%08lx",
             (unsigned long)source_start,
             (unsigned long)source_end,
             (unsigned long)source_size,
             (unsigned long)destination,
-            (unsigned long)source_entry);
+            (unsigned long)source_execute,
+            (unsigned long)source_gettable,
+            (unsigned long)source_settable);
         return 0;
     }
 
@@ -121,16 +138,20 @@ int open8_dtcm_exec_init(PlaydateAPI* pd)
     }
 
     pd->system->clearICache();
-    open8_vm_use_relocated(destination_entry);
+    open8_vm_use_relocated(destination_execute,
+                           destination_gettable,
+                           destination_settable);
     g_active = 1;
     pd->system->logToConsole(
-        "open8: DTCM VM active src=%08lx..%08lx dst=%08lx..%08lx size=%lu entry=%08lx guards=%08lx/%08lx",
+        "open8: DTCM VM+table active src=%08lx..%08lx dst=%08lx..%08lx size=%lu entries=%08lx/%08lx/%08lx guards=%08lx/%08lx",
         (unsigned long)source_start,
         (unsigned long)source_end,
         (unsigned long)destination,
         (unsigned long)(destination + source_size),
         (unsigned long)source_size,
-        (unsigned long)destination_entry,
+        (unsigned long)destination_execute,
+        (unsigned long)destination_gettable,
+        (unsigned long)destination_settable,
         (unsigned long)g_guard_low,
         (unsigned long)g_guard_high);
     return 1;

@@ -30,7 +30,7 @@ option(OPEN8_VM_LCF_FAST "Guarded fast path for Lua calls to light C functions" 
 option(OPEN8_VM_COMPACT "Compile the hot Lua interpreter core for minimum code size" OFF)
 option(OPEN8_VM_DTCM_PREFLIGHT "Report VM/DTCM placement without copying or executing code" OFF)
 option(OPEN8_VM_DTCM_WATERMARK "Paint the unused stack gap above the proposed DTCM pool" OFF)
-option(OPEN8_VM_DTCM_EXEC "Copy the compact Lua interpreter core to guarded executable DTCM" OFF)
+option(OPEN8_VM_DTCM_EXEC "Copy the compact Lua VM core and selected helpers to guarded executable DTCM" OFF)
 
 if (OPEN8_VM_DTCM_PREFLIGHT OR OPEN8_VM_DTCM_WATERMARK OR OPEN8_VM_DTCM_EXEC)
 	set(OPEN8_VM_COMPACT ON)

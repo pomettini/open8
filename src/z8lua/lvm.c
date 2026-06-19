@@ -197,7 +197,12 @@ static void callTM (lua_State *L, const TValue *f, const TValue *p1,
 }
 
 
+#ifdef OPEN8_VM_DTCM_EXEC
+static void OPEN8_VM_CORE_ATTR open8_luaV_gettable_impl
+    (lua_State *L, const TValue *t, TValue *key, StkId val) {
+#else
 void luaV_gettable (lua_State *L, const TValue *t, TValue *key, StkId val) {
+#endif
   int loop;
   // PICO-8 0.2.5 changelog: sub(str,pos,pos) can be written as str[pos]
   if (ttisstring(t)) {
@@ -235,7 +240,12 @@ void luaV_gettable (lua_State *L, const TValue *t, TValue *key, StkId val) {
 }
 
 
+#ifdef OPEN8_VM_DTCM_EXEC
+static void OPEN8_VM_CORE_ATTR open8_luaV_settable_impl
+    (lua_State *L, const TValue *t, TValue *key, StkId val) {
+#else
 void luaV_settable (lua_State *L, const TValue *t, TValue *key, StkId val) {
+#endif
   int loop;
   for (loop = 0; loop < MAXTAGLOOP; loop++) {
     const TValue *tm;
@@ -272,6 +282,26 @@ void luaV_settable (lua_State *L, const TValue *t, TValue *key, StkId val) {
   }
   luaG_runerror(L, "loop in settable");
 }
+
+#ifdef OPEN8_VM_DTCM_EXEC
+typedef void (*open8_vm_gettable_fn)
+    (lua_State *L, const TValue *t, TValue *key, StkId val);
+typedef void (*open8_vm_settable_fn)
+    (lua_State *L, const TValue *t, TValue *key, StkId val);
+
+static open8_vm_gettable_fn open8_vm_gettable_target =
+    open8_luaV_gettable_impl;
+static open8_vm_settable_fn open8_vm_settable_target =
+    open8_luaV_settable_impl;
+
+void luaV_gettable (lua_State *L, const TValue *t, TValue *key, StkId val) {
+  open8_vm_gettable_target(L, t, key, val);
+}
+
+void luaV_settable (lua_State *L, const TValue *t, TValue *key, StkId val) {
+  open8_vm_settable_target(L, t, key, val);
+}
+#endif
 
 
 static int call_binTM (lua_State *L, const TValue *p1, const TValue *p2,
@@ -1145,12 +1175,29 @@ uintptr_t open8_vm_execute_source_address (void) {
   return (uintptr_t)open8_luaV_execute_impl;
 }
 
-void open8_vm_use_relocated (uintptr_t address) {
-  open8_vm_execute_target = (open8_vm_execute_fn)(address | (uintptr_t)1u);
+uintptr_t open8_vm_gettable_source_address (void) {
+  return (uintptr_t)open8_luaV_gettable_impl;
+}
+
+uintptr_t open8_vm_settable_source_address (void) {
+  return (uintptr_t)open8_luaV_settable_impl;
+}
+
+void open8_vm_use_relocated (uintptr_t execute_address,
+                             uintptr_t gettable_address,
+                             uintptr_t settable_address) {
+  open8_vm_gettable_target =
+      (open8_vm_gettable_fn)(gettable_address | (uintptr_t)1u);
+  open8_vm_settable_target =
+      (open8_vm_settable_fn)(settable_address | (uintptr_t)1u);
+  open8_vm_execute_target =
+      (open8_vm_execute_fn)(execute_address | (uintptr_t)1u);
 }
 
 void open8_vm_use_original (void) {
   open8_vm_execute_target = open8_luaV_execute_impl;
+  open8_vm_gettable_target = open8_luaV_gettable_impl;
+  open8_vm_settable_target = open8_luaV_settable_impl;
 }
 #endif
 
