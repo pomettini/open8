@@ -214,6 +214,71 @@ static void hline(int x0, int x1, int y, int* color)
     }
 }
 
+#ifdef OPEN8_GFX_FAST
+static void fill_solid_rect(int x0, int y0, int x1, int y1, int* color)
+{
+    if (y0 > y1 || y1 < 0 || y0 > 127) return;
+    if (x0 > x1) {
+        int t = x0; x0 = x1; x1 = t;
+    }
+    if (x1 < 0 || x0 > 127) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 > 127) x1 = 127;
+    if (y0 < 0) y0 = 0;
+    if (y1 > 127) y1 = 127;
+
+    uint16_t pattern = (pico8_ram[0x5f31] << 8) | pico8_ram[0x5f32];
+    if (pattern != 0)
+    {
+        for (int y = y0; y <= y1; y++)
+        {
+            hline(x0, x1, y, color);
+        }
+        return;
+    }
+
+    uint8_t p8_color = color ? (*color & 0x0F) : pico8_ram[0x5f25];
+    p8_color = pico8_ram[0x5f00 + p8_color] & 0x0F;
+    uint8_t color_pair = p8_color | (p8_color << 4);
+    int first_byte = x0 >> 1;
+    int last_byte = x1 >> 1;
+    int middle_first = first_byte + (x0 & 1);
+    int middle_last = last_byte - !(x1 & 1);
+
+    for (int y = y0; y <= y1; y++)
+    {
+        uint8_t* row = &pico8_ram[0x6000 + (y << 6)];
+
+        if (x0 & 1)
+        {
+            row[first_byte] =
+                (uint8_t)((row[first_byte] & 0x0F) | (p8_color << 4));
+        }
+        if (!(x1 & 1))
+        {
+            row[last_byte] =
+                (uint8_t)((row[last_byte] & 0xF0) | p8_color);
+        }
+
+        int count = middle_last - middle_first + 1;
+        if (count > 0)
+        {
+            uint8_t* dst = &row[middle_first];
+            if (count <= 8)
+            {
+                do {
+                    *dst++ = color_pair;
+                } while (--count);
+            }
+            else
+            {
+                SDL_memset(dst, color_pair, (size_t)count);
+            }
+        }
+    }
+}
+#endif
+
 static void draw_circle(int cx, int cy, int radius, int* color, bool fill)
 {
     /* Fast paths for the small radii (r=0,1,2). */
@@ -417,10 +482,14 @@ static void draw_rect(int x0, int y0, int x1, int y1, int* color, bool fill)
 {
     if (fill)
     {
+#ifdef OPEN8_GFX_FAST
+        fill_solid_rect(x0, y0, x1, y1, color);
+#else
         for (int y = y0; y <= y1; y++)
         {
             hline(x0, x1, y, color);
         }
+#endif
     }
     else
     {
@@ -1177,7 +1246,51 @@ static int pico8_sget(lua_State* L)
     return 1;
 }
 
-static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h, bool flip_x, bool flip_y)
+#ifdef OPEN8_GFX_FAST
+/*
+ * packed_pair_lut[source byte] stores:
+ *   low byte  = two draw-palette-remapped output nibbles;
+ *   high byte = destination bits to preserve for transparent source nibbles.
+ * The 512-byte table is rebuilt only when the 16-byte draw palette changes.
+ */
+static uint16_t g_packed_pair_lut[256];
+static uint8_t g_packed_pair_palette[16];
+static int g_packed_pair_valid;
+
+static const uint16_t* packed_pair_lut(void)
+{
+    const uint8_t* palette = &pico8_ram[0x5f00];
+    if (!g_packed_pair_valid ||
+        SDL_memcmp(g_packed_pair_palette, palette, 16) != 0)
+    {
+        SDL_memcpy(g_packed_pair_palette, palette, 16);
+        for (int source = 0; source < 256; source++)
+        {
+            uint8_t lo = g_packed_pair_palette[source & 0x0F];
+            uint8_t hi = g_packed_pair_palette[source >> 4];
+            uint8_t output = 0;
+            uint8_t preserve = 0;
+
+            if (lo & 0x10) preserve |= 0x0F;
+            else output |= lo & 0x0F;
+            if (hi & 0x10) preserve |= 0xF0;
+            else output |= (uint8_t)((hi & 0x0F) << 4);
+
+            g_packed_pair_lut[source] =
+                (uint16_t)output | ((uint16_t)preserve << 8);
+        }
+        g_packed_pair_valid = 1;
+    }
+    return g_packed_pair_lut;
+}
+#endif
+
+static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w,
+                          uint8_t h, bool flip_x, bool flip_y
+#ifdef OPEN8_GFX_FAST
+                          , const uint16_t* pair_lut
+#endif
+                          )
 {
     int32_t width = w * 8;
     int32_t height = h * 8;
@@ -1196,6 +1309,7 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
     uint16_t sprite_x_base = (n & 0xF) << 2;
     uint16_t sprite_y_base = (n >> 4) * 512;
 
+#ifndef OPEN8_GFX_FAST
     // Build a local color map from the palette RAM once per sprite call.
     // Bit 4 = transparent flag, bits 0-3 = remapped color.
     uint8_t color_map[16];
@@ -1203,6 +1317,7 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
     {
         color_map[i] = pico8_ram[0x5f00 + i];
     }
+#endif
 
     // Fast path: no flip and an even destination x. Source and destination
     // nibbles then align, so we read one source byte and (for two opaque pixels)
@@ -1220,6 +1335,22 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
             for (int32_t dx = dx_start; dx < dx_end; dx += 2)
             {
                 uint8_t sbyte = pico8_ram[sprite_row_addr + ((uint16_t)dx >> 1)];
+#ifdef OPEN8_GFX_FAST
+                uint16_t pair = pair_lut[sbyte];
+                uint8_t output = (uint8_t)pair;
+                uint8_t preserve = (uint8_t)(pair >> 8);
+                uint8_t* d = &pico8_ram[
+                    screen_row_addr + ((uint16_t)(x + dx) >> 1)];
+
+                if (preserve == 0)
+                {
+                    *d = output;
+                }
+                else if (preserve != 0xFF)
+                {
+                    *d = (uint8_t)((*d & preserve) | output);
+                }
+#else
                 uint8_t pal_lo = color_map[sbyte & 0x0F];
                 uint8_t pal_hi = color_map[(sbyte >> 4) & 0x0F];
                 uint8_t* d = &pico8_ram[screen_row_addr + ((uint16_t)(x + dx) >> 1)];
@@ -1238,6 +1369,7 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
                 {
                     *d = (uint8_t)((*d & 0x0F) | ((pal_hi & 0x0F) << 4));
                 }
+#endif
             }
         }
         return;
@@ -1256,11 +1388,23 @@ static void draw_sprite_n(uint8_t n, int32_t x, int32_t y, uint8_t w, uint8_t h,
             int32_t sx = flip_x ? (width - 1 - dx) : dx;
             uint16_t sprite_addr = sprite_row_addr + sprite_x_base + ((uint16_t)sx >> 1);
             uint8_t byte = pico8_ram[sprite_addr];
+#ifdef OPEN8_GFX_FAST
+            uint16_t pair = pair_lut[byte];
+            uint8_t source_nibble = (sx & 1) ? (uint8_t)(pair >> 4) :
+                                               (uint8_t)pair;
+            uint8_t preserve = (sx & 1) ? (uint8_t)(pair >> 12) :
+                                         (uint8_t)(pair >> 8);
+
+            if ((preserve & 0x0F) == 0)
+            {
+                uint8_t mapped_color = source_nibble & 0x0F;
+#else
             uint8_t pal = color_map[(sx & 1) ? ((byte >> 4) & 0x0F) : (byte & 0x0F)];
 
             if (!(pal & 0x10))
             {
                 uint8_t mapped_color = pal & 0x0F;
+#endif
                 int32_t px = x + dx;
                 uint16_t screen_addr = screen_row_addr + ((uint16_t)px >> 1);
                 uint8_t* screen_byte = &pico8_ram[screen_addr];
@@ -1301,7 +1445,11 @@ static int pico8_spr(lua_State* L)
 
     apply_camera_offset((int*)&x, (int*)&y);
 
-    draw_sprite_n(n, x, y, w, h, flip_x, flip_y);
+    draw_sprite_n(n, x, y, w, h, flip_x, flip_y
+#ifdef OPEN8_GFX_FAST
+                  , packed_pair_lut()
+#endif
+                  );
 
     return 0;
 }
@@ -1456,6 +1604,10 @@ static int pico8_map(lua_State* L)
         layer = (uint8_t)fix32_to_uint32(luaL_checknumber(L, 7));
     }
 
+#ifdef OPEN8_GFX_FAST
+    const uint16_t* pair_lut = packed_pair_lut();
+#endif
+
     for (int ty = 0; ty < celh; ty++)
     {
         for (int tx = 0; tx < celw; tx++)
@@ -1472,7 +1624,12 @@ static int pico8_map(lua_State* L)
                 continue;
             }
 
-            draw_sprite_n(sprite, sx + tx * 8, sy + ty * 8, 1, 1, false, false);
+            draw_sprite_n(sprite, sx + tx * 8, sy + ty * 8,
+                          1, 1, false, false
+#ifdef OPEN8_GFX_FAST
+                          , pair_lut
+#endif
+                          );
         }
     }
 

@@ -462,7 +462,9 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
         pd->system->logToConsole("open8: [1] init, shim ready");
 
         build_display_tables();
-#ifdef OPEN8_VM_DTCM_EXEC
+#if defined(OPEN8_VM_DTCM_EXEC) && defined(OPEN8_GFX_FAST)
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + DTCM VM+table + gfx fast)");
+#elif defined(OPEN8_VM_DTCM_EXEC)
         pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + DTCM VM+table)");
 #elif defined(OPEN8_VM_DTCM_WATERMARK)
         pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + DTCM watermark)");

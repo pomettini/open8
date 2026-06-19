@@ -1188,6 +1188,72 @@ performance work should return to the measured C graphics-fill path, aiming to
 remove enough of its remaining cost to keep the 90th-percentile frame below
 33.3 ms. The target is no longer higher peak FPS; it is stable 30 fps.
 
+#### Guarded graphics fast paths — device result, ACCEPTED
+
+The next bounded experiment is implemented behind `OPEN8_GFX_FAST`. It keeps
+patterned rectangles on the existing path, but hoists clipping, palette lookup,
+and solid-color setup out of the per-row `rectfill()` loop. For `spr()` and
+`map()`, a 512-byte packed-pair table caches both draw-palette remapping and
+transparency masks; `map()` resolves the table once for the whole tile region.
+
+The complete host suite passes with the option both off and on, including the
+graphics CRC, clipping, flips, palette remapping, transparency, `spr()`, and
+`map()` checks. The Release ARM A/B is small and leaves the accepted 4,464-byte
+DTCM VM+table block unchanged:
+
+| build | text | data | BSS | packaged `pdex.bin` |
+|---|---:|---:|---:|---:|
+| VM+table DTCM baseline | 188,000 B | 113,452 B | 73,040 B | 244,500 B |
+| plus `OPEN8_GFX_FAST` | 188,408 B | 113,452 B | 73,576 B | 244,841 B |
+| delta | +408 B | 0 B | +536 B | +341 B |
+
+The staged package marker is
+`compact 4K LUT + DTCM VM+table + gfx fast`. It was rebuilt on 2026-06-20
+and copied to the Playdate after confirming that the installed package exactly
+matched the accepted VM+table baseline hash. All three package files were
+byte-verified, metadata artifacts were removed, and the volume was safely
+ejected. The game was not launched automatically and the host did not attach to
+or read the device console.
+
+The manually supplied capture confirmed the exact startup marker and unchanged
+DTCM layout:
+
+```text
+open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + DTCM VM+table + gfx fast)
+open8: DTCM VM+table active src=600013c0..60002530
+  dst=20007880..200089f0 size=4464
+  entries=20007ac1/20007881/200079a1
+  guards=20007870/20008a00
+```
+
+No DTCM disable or guard-touch line appeared. Excluding the first four
+title/menu samples, 42 Celeste gameplay samples produced:
+
+| metric | gfx-fast median | 10th–90th percentile |
+|---|---:|---:|
+| measured fps | **29** | 27–30 |
+| update | **14.91 ms** | 6.55–19.85 ms |
+| draw | **12.39 ms** | 11.39–16.65 ms |
+| blit | **1.93 ms** | 1.76–2.88 ms |
+| per-sample summed frame | **29.80 ms** | 23.55–34.33 ms |
+
+The component-median sum is 29.23 ms. Thirty-three of 42 samples (**78.6%**)
+fit inside the 33.3 ms frame budget, and 17 samples reported at least 30 fps.
+
+Compared with the accepted VM+table DTCM capture:
+
+| build | update | draw | blit | per-sample frame | budget hit rate | fps |
+|---|---:|---:|---:|---:|---:|---:|
+| DTCM VM + table helpers | 15.65 ms | 13.16 ms | 1.97 ms | 30.97 ms | 70.0% | 28 |
+| plus graphics fast paths | **14.91 ms** | **12.39 ms** | **1.93 ms** | **29.80 ms** | **78.6%** | **29** |
+
+The graphics paths save about **1.17 ms/frame (3.8%)** at the median and
+**3.58 ms (9.4%)** at the 90th percentile. The heavier-frame improvement is
+the more important result: budget compliance rises by 8.6 percentage points
+and displayed median FPS rises from 28 to 29. This is a clear accept given its
+small code/RAM cost and complete semantic coverage, but it does not yet make
+30 fps fully stable—the 90th-percentile frame remains about 1.0 ms over budget.
+
 This VM+table package was copied to the Playdate, byte-verified, and safely
 ejected on 2026-06-19. It was not launched automatically and the host did not
 attach to or read the device console.
