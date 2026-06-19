@@ -15,6 +15,7 @@
 
 #include "lua.h"
 
+#include "lapi.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -31,6 +32,94 @@
 
 /* limit for table tag-method chains (to avoid loops) */
 #define MAXTAGLOOP	100
+
+#if defined(OPEN8_VM_DTCM_LAYOUT) && defined(__GNUC__) && !defined(__clang__)
+#define OPEN8_VM_CORE_ATTR \
+  __attribute__((section(".text.open8_vm_hot"), optimize("Os"), aligned(32), \
+                 noinline, used))
+#elif defined(OPEN8_VM_COMPACT) && defined(__GNUC__) && !defined(__clang__)
+/*
+** Playdate's Cortex-M7 is often limited by its small instruction cache. Keep
+** the large interpreter dispatch function compact without reducing the
+** optimization level of arithmetic helpers or the rest of the engine.
+*/
+#define OPEN8_VM_CORE_ATTR __attribute__((optimize("Os"), aligned(32)))
+#elif defined(OPEN8_VM_COMPACT)
+#define OPEN8_VM_CORE_ATTR __attribute__((aligned(32)))
+#else
+#define OPEN8_VM_CORE_ATTR
+#endif
+
+#if defined(OPEN8_VM_DTCM_LAYOUT) && defined(__arm__)
+extern char __open8_vm_hot_start[];
+extern char __open8_vm_hot_end[];
+#endif
+
+#ifdef OPEN8_VM_DTCM_PREFLIGHT
+static uintptr_t open8_vm_min_sp = UINTPTR_MAX;
+#endif
+
+#if defined(OPEN8_VM_LCF_FAST) && \
+    !defined(HARDSTACKTESTS) && !defined(HARDMEMTESTS)
+
+#ifdef OPEN8_VM_LCF_FAST_TEST_COUNTER
+uint32_t open8_vm_lcf_fast_count = 0;
+#define OPEN8_COUNT_LCF_FAST() (open8_vm_lcf_fast_count++)
+#else
+#define OPEN8_COUNT_LCF_FAST() ((void)0)
+#endif
+
+/*
+** Fast path for the common Lua-bytecode -> light-C-function call.
+**
+** The normal luaD_precall path must handle stack growth, hooks, GC stepping,
+** C closures, and allocation of a new CallInfo. When none of those services is
+** needed, this performs only the CallInfo setup required by the public C API,
+** invokes the function, and moves its results through the normal poscall path.
+**
+** C functions may still grow the stack, call Lua, or throw an error after
+** entry: the fully formed CallInfo keeps those operations and protected-call
+** recovery identical to the general path.
+*/
+static int open8_try_lcf_fastcall (lua_State *L, StkId func, int nresults) {
+  CallInfo *caller;
+  CallInfo *ci;
+  lua_CFunction f;
+  int n;
+
+  if (!ttislcf(func) ||
+      L->hookmask != 0 ||
+      G(L)->GCdebt > 0 ||
+      L->stack_last - L->top <= LUA_MINSTACK ||
+      L->ci->next == NULL)
+    return 0;
+
+  caller = L->ci;
+  ci = caller->next;
+  lua_assert(ci->previous == caller);
+
+  f = fvalue(func);
+  L->ci = ci;
+  ci->nresults = nresults;
+  ci->func = func;
+  ci->top = L->top + LUA_MINSTACK;
+  lua_assert(ci->top <= L->stack_last);
+  ci->callstatus = 0;
+
+  lua_unlock(L);
+  n = (*f)(L);
+  lua_lock(L);
+  api_checknelems(L, n);
+  luaD_poscall(L, L->top - n);
+  OPEN8_COUNT_LCF_FAST();
+  return 1;
+}
+
+#else
+
+#define open8_try_lcf_fastcall(L,func,nresults) 0
+
+#endif
 
 
 const TValue *luaV_tonumber (const TValue *obj, TValue *n) {
@@ -615,11 +704,21 @@ uint32_t open8_vm_ccall_count = 0;
 #define OPEN8_COUNT_CCALL()  ((void)0)
 #endif
 
-void luaV_execute (lua_State *L) {
+#ifdef OPEN8_VM_DTCM_EXEC
+static void OPEN8_VM_CORE_ATTR open8_luaV_execute_impl (lua_State *L) {
+#else
+void OPEN8_VM_CORE_ATTR luaV_execute (lua_State *L) {
+#endif
   CallInfo *ci = L->ci;
   LClosure *cl;
   TValue *k;
   StkId base;
+#if defined(OPEN8_VM_DTCM_PREFLIGHT) && defined(__arm__)
+  uintptr_t open8_sp;
+  __asm__ volatile ("mov %0, sp" : "=r" (open8_sp));
+  if (open8_sp < open8_vm_min_sp)
+    open8_vm_min_sp = open8_sp;
+#endif
 #ifdef OPEN8_VM_GOTO
   Instruction i;
   StkId ra;
@@ -862,7 +961,8 @@ void luaV_execute (lua_State *L) {
         int b = GETARG_B(i);
         int nresults = GETARG_C(i) - 1;
         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
-        if (luaD_precall(L, ra, nresults)) {  /* C function? */
+        if (open8_try_lcf_fastcall(L, ra, nresults) ||
+            luaD_precall(L, ra, nresults)) {  /* C function? */
           OPEN8_COUNT_CCALL();
           if (nresults >= 0) L->top = ci->top;  /* adjust results */
           base = ci->u.l.base;
@@ -877,7 +977,8 @@ void luaV_execute (lua_State *L) {
         int b = GETARG_B(i);
         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
         lua_assert(GETARG_C(i) - 1 == LUA_MULTRET);
-        if (luaD_precall(L, ra, LUA_MULTRET)) {  /* C function? */
+        if (open8_try_lcf_fastcall(L, ra, LUA_MULTRET) ||
+            luaD_precall(L, ra, LUA_MULTRET)) {  /* C function? */
           OPEN8_COUNT_CCALL();
           base = ci->u.l.base;
         }
@@ -1031,3 +1132,40 @@ void luaV_execute (lua_State *L) {
   }
 #endif
 }
+
+#ifdef OPEN8_VM_DTCM_EXEC
+typedef void (*open8_vm_execute_fn)(lua_State *L);
+static open8_vm_execute_fn open8_vm_execute_target = open8_luaV_execute_impl;
+
+void luaV_execute (lua_State *L) {
+  open8_vm_execute_target(L);
+}
+
+uintptr_t open8_vm_execute_source_address (void) {
+  return (uintptr_t)open8_luaV_execute_impl;
+}
+
+void open8_vm_use_relocated (uintptr_t address) {
+  open8_vm_execute_target = (open8_vm_execute_fn)(address | (uintptr_t)1u);
+}
+
+void open8_vm_use_original (void) {
+  open8_vm_execute_target = open8_luaV_execute_impl;
+}
+#endif
+
+#if defined(OPEN8_VM_DTCM_LAYOUT) && defined(__arm__)
+uintptr_t open8_vm_hot_start_address (void) {
+  return (uintptr_t)__open8_vm_hot_start;
+}
+
+uintptr_t open8_vm_hot_end_address (void) {
+  return (uintptr_t)__open8_vm_hot_end;
+}
+#endif
+
+#ifdef OPEN8_VM_DTCM_PREFLIGHT
+uintptr_t open8_vm_preflight_min_sp (void) {
+  return open8_vm_min_sp;
+}
+#endif

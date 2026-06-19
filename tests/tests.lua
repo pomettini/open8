@@ -150,6 +150,50 @@ function test_control_flow()
     assert_equal(sum, 6, "for loop")
 end
 
+-- Guarded z8lua light-C call path. These functions are registered by tests.c
+-- with lua_pushcfunction(), so calls from this script use LUA_TLCF.
+function test_light_c_calls()
+    local a, b, c = lcf_results(7)
+    assert_equal(a, 7, "light-C multiple result 1")
+    assert_equal(b, 8, "light-C multiple result 2")
+    assert_equal(c, 9, "light-C multiple result 3")
+
+    local function double(v)
+        return v * 2
+    end
+    assert_equal(lcf_nested(double, 21), 43, "light-C nested Lua call")
+
+    assert_equal(lcf_grow_stack(0x1234), 255,
+        "light-C stack growth preserves result")
+
+    local ok, message = pcall(lcf_error)
+    assert_true(not ok, "light-C error reaches pcall")
+    assert_true(type(message) == "string" and #message > 0,
+        "light-C error object preserved")
+
+    local nested_ok = pcall(lcf_nested, function()
+        error("expected nested callback error")
+    end, 1)
+    assert_true(not nested_ok, "light-C nested callback error unwinds")
+
+    local hook_calls = 0
+    local function call_hook(event)
+        if event == "call" then
+            hook_calls += 1
+        end
+    end
+    debug.sethook(call_hook, "c")
+    lcf_results(11)
+    debug.sethook()
+    assert_true(hook_calls > 0, "light-C call hook preserved")
+
+    local sum = 0
+    for i = 1, 256 do
+        sum += abs(-i)
+    end
+    assert_equal(sum, 32896, "repeated light-C calls")
+end
+
 -- Graphics.
 function test_graphics()
     cls()
@@ -1204,6 +1248,7 @@ function run_tests()
     test_relational_operations()
     test_logical_operations()
     test_control_flow()
+    test_light_c_calls()
     test_graphics()
     test_math()
     test_memory()

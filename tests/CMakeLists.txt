@@ -4,6 +4,14 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
 
 project(tests C)
 
+option(OPEN8_VM_LCF_FAST "Guarded fast path for Lua calls to light C functions" OFF)
+option(OPEN8_VM_COMPACT "Compile the hot Lua interpreter core for minimum code size" OFF)
+option(OPEN8_VM_DTCM_EXEC "Exercise the indirect VM entry used by DTCM builds" OFF)
+
+if (OPEN8_VM_DTCM_EXEC)
+  set(OPEN8_VM_COMPACT ON)
+endif()
+
 set(EXPORT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${EXPORT_DIR}")
 
@@ -53,6 +61,17 @@ set(tests_sources ${CMAKE_CURRENT_SOURCE_DIR}/tests.c)
 
 add_executable(tests ${base_sources} ${tests_sources})
 target_link_libraries(tests PRIVATE ${SDL3_LIBRARIES})
+if (OPEN8_VM_LCF_FAST)
+  target_compile_definitions(tests PRIVATE
+    OPEN8_VM_LCF_FAST=1
+    OPEN8_VM_LCF_FAST_TEST_COUNTER=1)
+endif()
+if (OPEN8_VM_COMPACT)
+  target_compile_definitions(tests PRIVATE OPEN8_VM_COMPACT=1)
+endif()
+if (OPEN8_VM_DTCM_EXEC)
+  target_compile_definitions(tests PRIVATE OPEN8_VM_DTCM_EXEC=1)
+endif()
 
 add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 

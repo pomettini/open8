@@ -31,6 +31,15 @@ extern int open8_profile_skip_fill;
 extern uint32_t open8_vm_instr_count;   /* bytecode ops executed (load characterizer) */
 extern uint32_t open8_vm_ccall_count;   /* C-function calls executed */
 #endif
+#if defined(OPEN8_VM_DTCM_PREFLIGHT) && defined(__arm__)
+extern uintptr_t open8_vm_hot_start_address(void);
+extern uintptr_t open8_vm_hot_end_address(void);
+extern uintptr_t open8_vm_preflight_min_sp(void);
+#endif
+#ifdef OPEN8_VM_DTCM_EXEC
+extern int open8_dtcm_exec_init(PlaydateAPI* pd);
+extern int open8_dtcm_exec_check(void);
+#endif
 
 #include "SDL3/SDL.h"    /* SDL_GAMEPAD_BUTTON_* (so the button mapping stays in sync) */
 
@@ -271,6 +280,10 @@ static int update(void* userdata)
 
     if (g_log_first) pd->system->logToConsole("open8: frame1 begin");
 
+#ifdef OPEN8_VM_DTCM_EXEC
+    open8_dtcm_exec_check();
+#endif
+
 #ifdef OPEN8_PROFILE_LOAD
     uint32_t ui = 0, uc = 0, di = 0, dc = 0; /* per-phase load counts */
 #endif
@@ -288,6 +301,9 @@ static int update(void* userdata)
     open8_profile_api_reset();
 #endif
     core_pd_update();
+#ifdef OPEN8_VM_DTCM_EXEC
+    open8_dtcm_exec_check();
+#endif
 #ifdef OPEN8_PROFILE_API
     api_update = open8_profile_api;
     open8_profile_api_reset();
@@ -299,6 +315,9 @@ static int update(void* userdata)
     if (g_log_first) pd->system->logToConsole("open8: frame1 update ok");
     uint32_t t1 = pd_shim_ticks();
     core_pd_draw();
+#ifdef OPEN8_VM_DTCM_EXEC
+    open8_dtcm_exec_check();
+#endif
 #ifdef OPEN8_PROFILE_API
     api_draw = open8_profile_api;
 #endif
@@ -368,6 +387,27 @@ static int update(void* userdata)
                                  (unsigned long)us_draw,
                                  (unsigned long)us_blit);
 #endif
+#if defined(OPEN8_VM_DTCM_PREFLIGHT) && defined(__arm__)
+        {
+            const uintptr_t vm_sp = open8_vm_preflight_min_sp();
+            const intptr_t margin = (intptr_t)vm_sp - (intptr_t)0x20008a00u;
+            pd->system->logToConsole(
+                "dtcm_preflight vmsp_min=%08lx pool_top=20008a00 margin=%ld",
+                (unsigned long)vm_sp, (long)margin);
+        }
+#endif
+#ifdef OPEN8_VM_DTCM_WATERMARK
+        {
+            extern uintptr_t open8_dtcm_watermark_low(void);
+            extern uintptr_t open8_dtcm_watermark_end(void);
+            const uintptr_t low = open8_dtcm_watermark_low();
+            const intptr_t margin = (intptr_t)low - (intptr_t)0x20008a00u;
+            pd->system->logToConsole(
+                "dtcm_watermark low=%08lx pool_top=20008a00 margin=%ld end=%08lx",
+                (unsigned long)low, (long)margin,
+                (unsigned long)open8_dtcm_watermark_end());
+        }
+#endif
 #ifdef OPEN8_PROFILE_API
         pd->system->logToConsole(
             "api_u tbl[all=%lu items=%lu add=%lu del=%lu shifts=%lu foreach=%lu items=%lu] gfx[all=%lu prim=%lu print=%lu spr=%lu sspr=%lu map=%lu cells=%lu]",
@@ -422,11 +462,43 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
         pd->system->logToConsole("open8: [1] init, shim ready");
 
         build_display_tables();
-        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4)");
+#ifdef OPEN8_VM_DTCM_EXEC
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + DTCM VM)");
+#elif defined(OPEN8_VM_DTCM_WATERMARK)
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + DTCM watermark)");
+#elif defined(OPEN8_VM_DTCM_PREFLIGHT)
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + DTCM preflight)");
+#elif defined(OPEN8_VM_LCF_FAST)
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + LCF fast)");
+#elif defined(OPEN8_VM_COMPACT)
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT + compact VM)");
+#else
+        pd->system->logToConsole("open8: [2] display tables built (240x240 + Bayer 4x4 + compact 4K LUT)");
+#endif
 
         const char* err = NULL;
         g_font = pd->graphics->loadFont("/System/Fonts/Asheville-Sans-14-Bold.pft", &err);
         pd->system->logToConsole("open8: [3] font = %p (%s)", (void*)g_font, err ? err : "ok");
+
+#if defined(OPEN8_VM_DTCM_PREFLIGHT) && defined(__arm__)
+        {
+            const uintptr_t source_start = open8_vm_hot_start_address();
+            const uintptr_t source_end = open8_vm_hot_end_address();
+            const uintptr_t source_size = source_end - source_start;
+            const uintptr_t pool_top = 0x20008a00u;
+            const uintptr_t pool_bottom = (pool_top - source_size) & ~(uintptr_t)15u;
+            const uintptr_t init_frame = (uintptr_t)__builtin_frame_address(0);
+            pd->system->logToConsole(
+                "open8: DTCM preflight src=%08lx..%08lx size=%lu pool=%08lx..%08lx initframe=%08lx floor_ok=%d",
+                (unsigned long)source_start,
+                (unsigned long)source_end,
+                (unsigned long)source_size,
+                (unsigned long)pool_bottom,
+                (unsigned long)pool_top,
+                (unsigned long)init_frame,
+                pool_bottom >= 0x200074d0u);
+        }
+#endif
 
         pd->system->logToConsole("open8: [4] core_pd_init...");
         if (!core_pd_init())
@@ -438,6 +510,10 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
             pd->system->logToConsole("open8: [5] booting first cart...");
             boot_cart(0);
         }
+
+#ifdef OPEN8_VM_DTCM_EXEC
+        open8_dtcm_exec_init(pd);
+#endif
 
         /* System menu: pick a test cart; diagnostic probes are opt-in builds. */
         PDMenuItem* cart_item =
@@ -454,6 +530,13 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
 
         /* PICO-8 audio: a mono sound source pulling from the synth. */
         pd->sound->addSource(audio_cb, NULL, 0);
+
+#ifdef OPEN8_VM_DTCM_WATERMARK
+        {
+            extern void open8_dtcm_watermark_init(void);
+            open8_dtcm_watermark_init();
+        }
+#endif
 
         pd->display->setRefreshRate(30.0f);
         pd->system->setUpdateCallback(update, pd);

@@ -47,15 +47,20 @@ Current implementation:
 - on-device update/draw/blit timing plus opt-in profiling controls;
 - packed two-pixel sprite processing for common aligned, unflipped draws;
 - mutation-safe `all()` and `foreach()` snapshots optimized for lower traffic;
-- compact 4 KiB 8→15 scaler LUT currently awaiting device measurement.
+- compact 4 KiB 8→15 scaler LUT, validated on device at ~1.94 ms;
+- guarded runtime relocation of the compact Lua interpreter core into executable
+  DTCM, validated on device without canary fallback.
 
 Current bounded costs from the latest valid captures:
 
-- Celeste update: roughly 23–29 ms in ordinary gameplay;
-- Celeste full draw: roughly 20–22.5 ms;
+- DTCM Celeste update: **21.13 ms median** in stable gameplay;
+- DTCM Celeste full draw: **18.04 ms median**;
 - Celeste no-fill draw: roughly 14.1 ms with the packed sprite path;
 - original 240×240 per-pixel scaler: 10.60 ms;
 - first 32 KiB scaler LUT: 23.3–23.9 ms, rejected;
+- compact 4 KiB scaler LUT: **~2 ms median**, accepted;
+- DTCM per-sample summed frame: **40.90 ms median / 23 fps**;
+- remaining median gap to 30 fps: roughly **7.6–8.3 ms**;
 - 30 fps frame budget: 33.3 ms.
 
 ### Corrected production configuration
@@ -82,7 +87,9 @@ The Playdate SDK appends `-O2`, making it the effective optimization level.
 ### Conclusions that remain valid
 
 - Raw DWT register access faults because Playdate game code is unprivileged.
-- ITCM relocation is unavailable because the OS protects it.
+- Raw ITCM is not writable, but code relocation into executable DTCM has now
+  been proven on this exact device and SDK by the vecx port. It is a constrained
+  experimental path, not a general-purpose code segment.
 - Playdate's built-in Lua cannot load arbitrary cart source at runtime and does
   not implement PICO-8 syntax or 16.16 fixed-point semantics.
 - Computed-goto dispatch regresses under both the historical `-O0` build and the
@@ -128,11 +135,12 @@ from-scratch build.
 ## Hardware constraints (do not rediscover)
 
 - STM32F746 Cortex-M7 @168 MHz, 16 KB I-cache + 16 KB D-cache (4-way).
-- ITCM is MPU write-protected by the OS → unusable for relocated code. Hot code
-  relies on the 16 KB I-cache; keep dispatch + blit inner loops small.
-- DTCM 64 KB but only ~8 KB free in practice. Note the framebuffer is exactly
-  8 KB — relocating it (or the dither LUTs) into DTCM is a *measured* candidate,
-  not an assumption.
+- Raw ITCM is MPU write-protected. Executable code can nevertheless be copied
+  into a carefully chosen unused DTCM/stack gap at runtime. On this exact device
+  and SDK, vecx measured a contiguous safe window of roughly 5 KB; placement is
+  firmware-, stack-, and project-specific and requires canaries/probes.
+- DTCM is 64 KB but mostly occupied by firmware state and the game stack. Do
+  not treat it as a normal allocator or move cache-resident data there blindly.
 - 400×240 1-bit display. PICO-8 is 128×128, 16 colors.
 - Prior (Nofrendo): D-cache misses were the wall there. Treat that only as a
   hypothesis here; the first open8 investigation accidentally benchmarked `-O0`.
@@ -323,10 +331,12 @@ First device build poked raw DWT/DEMCR registers in `pd_shim_init`
 (`DEMCR |= TRCENA; DWT_CTRL |= CYCCNTENA`). **It crashed immediately on hardware**
 (simulator was fine — it never ran that path). Cause: Playdate runs game code
 *unprivileged*, and the OS MPU protects the debug/SCS region, so the write faults.
-This is the same MPU regime as the ITCM write-protection. **Lesson: a Cortex-M7
-cycle counter is not freely available to Playdate games the way it is in bare-
-metal firmware.** Replaced with `getElapsedTime()` (µs) on both targets. A future
-cycle-accurate profiler would need a sanctioned SDK path, not raw registers.
+This is the same unprivileged MPU regime that blocks raw ITCM writes and debug
+register access. It does not prevent execution from a proven writable DTCM gap.
+**Lesson: a Cortex-M7 cycle counter is not freely available to Playdate games
+the way it is in bare-metal firmware.** Replaced with `getElapsedTime()` (µs)
+on both targets. A future cycle-accurate profiler would need a sanctioned SDK
+path, not raw registers.
 
 Next step (Phase 1, data-driven): **split `t_draw`** into time spent inside the
 C graphics API (spr/map/rectfill blitting `0x6000`) vs. Lua/VM call overhead, via
@@ -820,7 +830,7 @@ The no-fill split does show that C-side rendering now costs about **6.3 ms**,
 down from the earlier 10–11 ms; the packed sprite path is likely contributing,
 though the captures are not a strict sprite-only A/B.
 
-Implemented for the next build: a compact form of the same 15:8 idea. The four
+The accepted successor uses a compact form of the same 15:8 idea. The four
 source bytes in a group all start on the same Bayer phase, so their expanded
 four-bit values can share one table and be shifted while composing the result.
 This removes redundant shifted copies and reduces the palette-aware LUT from
@@ -828,7 +838,309 @@ This removes redundant shifted copies and reduces the palette-aware LUT from
 is rebuilt only when the 16-byte display palette changes, preserving `pal()`.
 Benchmark lines always include `nofill=` and `gcoff=`.
 
-Next capture protocol, using one repeatable Celeste gameplay scene:
+#### Compact 4 KiB scaler LUT — device result, ACCEPTED
+
+The supplied Celeste capture ran normal full rendering throughout. Excluding
+title/startup and unusual gameplay samples, 55 stable gameplay samples produced:
+
+| metric | median |
+|---|---:|
+| t_update | 28.76 ms |
+| t_draw | 20.01 ms |
+| t_blit | **1.94 ms** |
+| summed frame | 50.47 ms |
+| measured fps | 19 |
+
+Gameplay `t_blit` had a 10th–90th percentile range of roughly 1.84–2.80 ms.
+Compared with the original 240×240 per-pixel scaler's 10.60 ms median, the
+compact LUT saves **8.66 ms/frame (about 82%)**. It is also about 12× faster
+than the rejected 32 KiB table while using one eighth of its storage.
+
+This restores nearly the old 128×128 blit's cost while retaining the 240×240
+height-filling image and Bayer dithering. Keep the compact LUT as the production
+display path. The remaining normal Celeste frame is now dominated by update
+(~29 ms) and draw (~20 ms), not final display conversion.
+
+#### Clean production baseline with compact scaler
+
+All profiling controls and counters were compiled out, and the production ELF
+was checked for the absence of their symbols. Stable Celeste gameplay:
+
+| build | update | draw | blit | summed frame | fps |
+|---|---:|---:|---:|---:|---:|
+| profiling build | 28.76 ms | 20.01 ms | 1.94 ms | 50.47 ms | 19 |
+| clean production | **27.44 ms** | **19.92 ms** | 2.17 ms | **49.73 ms** | 19 |
+
+The production build saves only about 0.74 ms/frame overall. Coarse API
+instrumentation was therefore not materially distorting the normal-frame
+conclusion. Warm title/menu samples remain at 30 fps (~1.19 ms update, ~9.73 ms
+draw, ~1.30 ms blit).
+
+The remaining gap to 30 fps is about **16.4 ms/frame**. Final conversion is no
+longer a useful target. Graphics fill accounts for roughly 6 ms of draw, while
+the residual update plus no-fill draw is still about 41.5 ms.
+
+#### Light-C builtin call fast path — device result, REJECTED
+
+Celeste's earlier load characterization counted roughly 108 C calls in update
+and 120 in draw per gameplay frame. PICO-8 API functions are registered with
+`lua_pushcfunction`, making them z8lua `LUA_TLCF` light C functions. Every call
+currently takes the general `luaD_precall()` path: stack check, `CallInfo`
+setup, GC-debt check, hook check, C invocation, and generic result movement.
+
+The A/B candidate added a guarded VM fast path for the common case:
+
+- the callee is a light C function;
+- no call hooks are active;
+- the stack already has `LUA_MINSTACK` headroom;
+- a reusable `CallInfo` is available;
+- otherwise fall back to the existing general path.
+
+This attacks overhead shared by update and draw and leaves C closures, yielding,
+stack growth, hooks, and error paths unchanged.
+
+Implemented behind `OPEN8_VM_LCF_FAST`: `OP_CALL` and `OP_TAILCALL` try the
+shortcut only for `LUA_TLCF` callees when hooks are disabled, GC debt is
+non-positive, `LUA_MINSTACK` headroom already exists, and the next `CallInfo`
+has already been allocated. Otherwise they fall through to `luaD_precall()`.
+The shortcut still creates a complete active call frame and uses
+`luaD_poscall()`, so nested Lua calls, stack relocation, errors, and result
+movement retain the normal machinery.
+
+Targeted host tests cover multiple results, nested Lua callbacks, forced stack
+growth, direct and nested errors through `pcall`, debug call hooks (which force
+fallback), and repeated light-C built-ins. The complete host suite passes with
+the option enabled, and a test-only counter recorded 2,235 shortcut executions.
+
+The clean device A/B package was built on 2026-06-19 with
+`OPEN8_VM_LCF_FAST=ON` and all profiling, arena, and computed-goto options off.
+The ARM text section grew by only 128 bytes, and packaged `pdex.bin` grew by
+123 bytes. Its startup marker ends in `compact 4K LUT + LCF fast`.
+
+The package was byte-verified after copying to the Playdate, then the device was
+safely ejected without launching the game or attaching to its console. Device
+capture, supplied manually, confirmed the `LCF fast` marker. For 55 stable
+gameplay samples:
+
+| build | update | draw | blit | summed frame | fps |
+|---|---:|---:|---:|---:|---:|
+| clean production baseline | 27.44 ms | 19.92 ms | 2.17 ms | 49.73 ms | 19 |
+| light-C fast path | 29.30 ms | 20.13 ms | 2.13 ms | 51.70 ms | 19 |
+
+Scene variance prevents treating the roughly 2 ms regression as exact, but the
+optimization clearly did not produce the required gain. Keep the implementation
+behind its default-off flag for reference; do not ship it.
+
+#### Compact VM core — device result, REJECTED in external memory
+
+The Playdate developer thread “Dirty Optimization Secrets” emphasizes that a
+smaller hot core can beat more aggressively optimized code because external
+memory misses and the small instruction cache dominate. It recommends `-Os`,
+contiguous hot code, and 32-byte cache-line alignment.
+
+`OPEN8_VM_COMPACT` applies GCC's `optimize("Os")` only to `luaV_execute` and
+aligns that function to 32 bytes, leaving the rest of open8 at Release `-O2`.
+In the final linked ARM build, this reduces `luaV_execute` from **5,548 bytes to
+3,708 bytes (−33%)** and places it at a 32-byte-aligned address. The full
+`lvm.c` object falls from 8,347 bytes to 7,429 bytes, total ELF text falls by
+872 bytes, and packaged `pdex.bin` falls by 774 bytes.
+
+The normal `-O2` interpreter was already 32-byte aligned, so this A/B primarily
+tested code-size optimization. The manually supplied device capture contained
+30 stable gameplay samples:
+
+| build | update | draw | blit | summed frame | fps-equivalent |
+|---|---:|---:|---:|---:|---:|
+| clean production baseline | 27.44 ms | 19.92 ms | 2.17 ms | 49.73 ms | 20.1 |
+| compact VM | 27.93 ms | 21.98 ms | 2.08 ms | 53.73 ms | 18.6 |
+
+The compact build is about **4.0 ms/frame slower**, with the largest median loss
+inside draw. Reject `OPEN8_VM_COMPACT` as an external-memory production option.
+Keep it default-off because its 3,708-byte interpreter may still be useful as
+the source image for a DTCM relocation experiment; vecx likewise observed that
+a compact fallback core could regress in slow memory before winning from TCM.
+
+#### Next bounded experiment: DTCM relocation preflight
+
+Do not immediately execute relocated VM code. First build a non-executing
+preflight that reports, through logs supplied manually by the tester:
+
+- current shallow-stack frame address during initialization;
+- compact VM source start/end and exact byte size;
+- proposed DTCM pool bottom/top;
+- safety distance from the current frame;
+- whether the proposed pool lies inside the vecx-proven device window.
+
+No writes or execution occur in this preflight. Once its addresses are confirmed,
+the execution experiment can use the proven vecx method:
+
+- collect the marked input section inside the normal `.text` output section so
+  Playdate applies relocations;
+- copy with a manual cacheable-source/volatile-destination word loop, never
+  `memcpy`;
+- place it only in a probed DTCM/stack gap with safety canaries;
+- compile relocated outbound calls with `-mlong-calls -fno-lto`;
+- flush I-cache and call through a Thumb-bit-adjusted pointer;
+- re-check final size, because long-call veneers may exceed the roughly 5 KB
+  measured safe window.
+
+Implemented behind `OPEN8_VM_DTCM_PREFLIGHT`. It implies the compact VM build,
+compiles `lvm.c` with `-mlong-calls -fno-lto`, and uses a local linker map that
+collects `.text.open8_vm_hot` inside the normal `.text` output section. Static
+verification shows:
+
+- `luaV_execute`: 3,896 bytes with long calls;
+- exact linker-bracketed copy span: **3,904 bytes**;
+- source section remains part of `.text`, with relocations in `.rel.text`;
+- proposed pool: `0x20007ac0–0x20008a00`;
+- distance above vecx's known firmware-data floor `0x200074d0`: 1,520 bytes.
+
+The preflight only reads addresses and tracks the lowest stack pointer observed
+at `luaV_execute` entry. It logs `dtcm_preflight vmsp_min=... margin=...` once
+per second. Require a comfortably positive margin across ordinary gameplay and
+room transitions before enabling any DTCM copy.
+
+#### DTCM address and stack safety — device result, PASSED
+
+The manually supplied capture matched the linked image exactly:
+
+- source: `0x600013c0–0x60002300`, 3,904 bytes;
+- proposed pool: `0x20007ac0–0x20008a00`;
+- initialization frame: `0x20009b80`;
+- lowest observed `luaV_execute` entry stack pointer:
+  `0x200098c8`;
+- measured entry-to-pool margin: **3,784 bytes**;
+- proposed pool bottom remains 1,520 bytes above vecx's measured firmware-data
+  floor.
+
+The entry margin stayed constant through sustained gameplay and a large update
+spike. An entry-point sample does not include stack consumed by helper functions
+after the VM begins executing, so this was followed by a stack watermark pass.
+
+A GCC `-fstack-usage` audit reports 64 bytes for `luaV_execute`; common VM and
+graphics helpers are mostly 16–176 bytes. Some string/library paths can exceed
+1 KB, so the measured 3.8 KB gap is likely adequate but should be verified
+dynamically before placing executable code there.
+
+`OPEN8_VM_DTCM_WATERMARK` is the final non-executing safety pass. After cart
+boot, it fills only the unused stack gap above `0x20008a00`, leaving 512 bytes
+below the then-current stack pointer. Gameplay naturally overwrites the pattern;
+the once-per-second `dtcm_watermark` line reports the true lowest touched
+address and remaining margin. It still performs no code relocation or execution.
+
+The manually supplied watermark capture reached a deepest touched address of
+`0x20009570`, leaving **2,928 bytes** between the measured stack low-water mark
+and the proposed pool top at `0x20008a00`. The result held through sustained
+Celeste gameplay and exceptional 283.780 ms and 345.096 ms update spikes.
+Earlier stable readings were `0x20009580` (2,944 bytes) and
+`0x200095b8` (3,000 bytes). This closes the dynamic stack-safety gate for the
+current device, firmware, SDK, and build layout.
+
+#### Guarded executable DTCM VM — device result, ACCEPTED
+
+`OPEN8_VM_DTCM_EXEC` performs the first executable test. It keeps the original
+interpreter in external memory and routes public `luaV_execute()` calls through
+a function pointer. After the initial cart has booted, the build:
+
+- copies only the compact, long-call `luaV_execute` implementation with a
+  cacheable-source/volatile-destination 32-bit loop;
+- verifies every copied word before enabling it;
+- writes 16-byte canaries immediately below and above the reserved code area;
+- clears the instruction cache and installs a Thumb-adjusted DTCM entry pointer;
+- checks both canaries before VM work, after update, and after draw;
+- immediately restores the original source interpreter and logs once if either
+  canary changes.
+
+The linked ARM image was statically verified before deployment:
+
+- source implementation: `0x000013c0–0x000022e8`, 3,880 bytes;
+- exact linker-bracketed copy span: `0x000013c0–0x000022f0`,
+  **3,888 bytes**;
+- DTCM destination: `0x20007ac0–0x200089f0`;
+- low/high canaries: `0x20007ab0` and `0x20008a00`;
+- runtime Thumb entry: `0x20007ac1`;
+- all 36 interpreter fixups remain in the normal `.rel.text` relocation stream;
+- outbound calls use copied literal addresses plus `blx`, so they remain valid
+  after moving the core;
+- the low canary remains 1,504 bytes above vecx's measured firmware-data floor,
+  while the high canary remains 2,928 bytes below the measured stack low-water
+  mark.
+
+The startup marker is `compact 4K LUT + DTCM VM`. The manually supplied device
+capture confirmed exact activation:
+
+```text
+open8: DTCM VM active src=600013c0..600022f0
+  dst=20007ac0..200089f0 size=3888 entry=20007ac1
+  guards=20007ab0/20008a00
+```
+
+No `disabled` or `guard touched` line appeared. The copied source range, DTCM
+destination, size, Thumb entry, and canaries all matched the linked image.
+
+Excluding the four title/menu samples, the capture contains 39 Celeste gameplay
+samples:
+
+| metric | DTCM VM median | 10th–90th percentile |
+|---|---:|---:|
+| measured fps | **23** | 21.8–26.0 |
+| update | **21.13 ms** | 11.69–27.30 ms |
+| draw | **18.04 ms** | 15.32–21.42 ms |
+| blit | 2.42 ms | 2.11–3.68 ms |
+| per-sample summed frame | **40.90 ms** | 32.16–47.39 ms |
+
+The sum of the three independent component medians is 41.60 ms. Using that
+same comparison method as earlier captures:
+
+| build | update | draw | blit | component-median sum |
+|---|---:|---:|---:|---:|
+| clean production baseline | 27.44 ms | 19.92 ms | 2.17 ms | 49.73 ms |
+| compact VM in external memory | 27.93 ms | 21.98 ms | 2.08 ms | 53.73 ms |
+| compact VM in DTCM | **21.13 ms** | **18.04 ms** | 2.42 ms | **41.60 ms** |
+
+Against the clean production baseline, executable DTCM saves about
+**8.14 ms/frame (16%)** and raises observed gameplay from roughly 19 fps to a
+23 fps median. Against the same compact core left in external memory, relocation
+saves about **12.13 ms/frame (23%)**. The title/menu phase also falls to roughly
+0.60 ms update and 7.5–7.8 ms draw after warm-up.
+
+This is the largest accepted CPU-side optimization in the current port. It also
+corrects the earlier interpretation that interpreter instruction fetch was too
+small to matter: dispatch style still is not the answer, but placing the compact
+dispatch core in zero-wait executable memory is decisively valuable.
+
+The remaining median gap to a 33.3 ms frame is roughly **7.6–8.3 ms**. The next
+bounded DTCM experiment should relocate `luaV_gettable` and `luaV_settable`
+alongside the interpreter. Their linked source bodies total only 580 bytes and
+serve five table-related opcodes plus public API table access. Use explicit
+source/relocated function pointers, not heuristic literal-pool rewriting, so
+guard fallback can restore every entry safely. The resulting block should remain
+near 4.5 KB, keep the proven `0x20008a00` pool top unchanged, preserve the full
+2,928-byte measured stack margin, and retain roughly 0.9 KB above the known
+firmware-data floor. Benchmark it strictly against this accepted DTCM-core build.
+
+If that helper bundle does not remove at least another 1–2 ms, stop expanding
+the VM block and return to the measured ~6.3 ms C graphics-fill path. A useful
+helper win plus the remaining graphics work is now a plausible route to 30 fps;
+neither is guaranteed to close the budget alone.
+
+The executable-DTCM package was copied to the Playdate, byte-verified, and
+safely ejected on 2026-06-19. It was not launched automatically and the host did
+not attach to or read the device console.
+
+Do not move the Lua heap or compact scaler LUT to DTCM merely because it is
+faster memory: vecx measured a regression when cache-resident hot data gained a
+runtime pointer indirection. Code relocation is the supported hypothesis.
+
+The complete host suite passes with `OPEN8_VM_COMPACT=ON`. The clean device
+package was built with the marker `compact 4K LUT + compact VM`, with light-C,
+profiling, arena, and computed-goto options all off.
+
+Operational note: if `pdutil ... datadisk` returns successfully but no PLAYDATE
+volume appears, check whether the Playdate Simulator app owns the USB port and
+close it before retrying. Do not open or read the serial stream while checking.
+
+For any later skip-fill capture, use one repeatable Celeste gameplay scene:
 
 1. Run full rendering for 15–20 seconds.
 2. Enable `no fill` and run for 15–20 seconds.
