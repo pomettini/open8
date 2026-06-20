@@ -28,8 +28,9 @@ z8lua VM and graphics API.
 
 ### Current outcome
 
-The port boots embedded `.p8.png` carts, runs z8lua, renders to the Playdate's
-1-bit display, handles input, synthesizes audio, and supports in-memory
+The port browses external `.p8`, `.p8.png`, and `.png` carts under
+`/Shared/Emulation/p8/games/`, runs z8lua, renders to the Playdate's 1-bit
+display, handles input, synthesizes audio, and supports in-memory
 `cartdata`/`dget`/`dset`.
 
 The earlier 6–13 fps “hardware ceiling” was an invalid conclusion from an
@@ -41,7 +42,8 @@ active optimization effort toward 30 fps.
 Current implementation:
 
 - Playdate backend and SDL compatibility shim under `platform/playdate/`;
-- four embedded test carts: Celeste, Jelpi, Racer, and Picross;
+- `pd-rom-picker` submodule with deferred, update-loop cart switching;
+- content-detected text `.p8` and encoded PNG cartridge loading;
 - centered 240×240 nearest-neighbor output with Bayer 4×4 dithering;
 - Playdate input and a platform-independent PICO-8 audio synth;
 - on-device update/draw/blit timing plus opt-in profiling controls;
@@ -50,6 +52,10 @@ Current implementation:
 - compact 4 KiB 8→15 scaler LUT, validated on device at ~1.94 ms;
 - guarded runtime relocation of the compact Lua interpreter core into executable
   DTCM, validated on device without canary fallback.
+
+Text `.p8` loading populates Lua, graphics, flags, map, SFX, and music RAM
+sections. `#include` remains deliberately unsupported; use a self-contained
+export or the encoded `.p8.png` form.
 
 Current bounded costs from the latest valid captures:
 

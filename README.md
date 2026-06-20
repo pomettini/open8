@@ -43,6 +43,29 @@ is often a key requirement. By keeping the codebase in C, open8 aims to remain
 accessible, lightweight, and easy to port to unconventional or
 resource-constrained platforms.
 
+## Playdate
+
+The Playdate port uses
+[pd-rom-picker](https://github.com/pomettini/pd-rom-picker) to browse carts in:
+
+```text
+/Shared/Emulation/p8/games/
+```
+
+Copy `.p8`, `.p8.png`, or `.png` PICO-8 cartridges into that folder. Text
+`.p8` carts load their `__lua__`, `__gfx__`, `__gff__`, `__map__`, `__sfx__`,
+and `__music__` sections. They must be self-contained; PICO-8 `#include`
+directives are not resolved on Playdate.
+
+Use the Playdate system-menu **ROM Picker** item to return to the browser and
+switch carts safely.
+
+After cloning, initialise the picker submodule:
+
+```sh
+git submodule update --init --recursive
+```
+
 ## Licence and Credits
 
 - This project is licensed under the "The MIT License".  See the file

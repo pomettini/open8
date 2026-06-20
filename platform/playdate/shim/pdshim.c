@@ -193,5 +193,5 @@ SDL_Finger** SDL_GetTouchFingers(SDL_JoystickID touchID, int* count)
 bool SDL_EnumerateDirectory(const char* path, SDL_EnumerateDirectoryCallback cb, void* userdata)
 {
     (void)path; (void)cb; (void)userdata;
-    return false; /* Current Playdate test carts are embedded. */
+    return false; /* Playdate directory browsing is handled by pd-rom-picker. */
 }

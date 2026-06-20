@@ -53,6 +53,7 @@ bool iterate_core(SDL_Renderer* renderer);
 // Playdate backend entry points (implemented in core.c). See pd_main.c.
 bool core_pd_init(void);
 bool core_pd_boot_cart(const uint8_t* data, long size);
+void core_pd_unload_cart(void);
 void core_pd_update(void);
 void core_pd_draw(void);
 void core_pd_set_gc(int on);

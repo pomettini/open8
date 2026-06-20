@@ -2,7 +2,7 @@
  *
  *  Playdate backend entry point for open8.
  *
- *  Boots embedded test carts, runs the z8lua VM, scales and dithers the PICO-8
+ *  Browses external carts, runs the z8lua VM, scales and dithers the PICO-8
  *  framebuffer to the 1-bit display, and reports update/draw/blit timing.
  *  Expensive probes are separately gated by OPEN8_PROFILE_LOAD and
  *  OPEN8_PROFILE_TOOLS so production builds do not pay their overhead.
@@ -11,6 +11,7 @@
  **/
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "pd_api.h"
@@ -21,6 +22,7 @@
 #include "audio.h"       /* audio_render */
 #include "profile.h"     /* opt-in coarse API counters */
 #include "pdshim.h"
+#include "rom_picker.h"
 
 /* Declared in api.c / lvm.c. Not via their headers: those pull z8lua's lua.h,
  * whose lua_State typedef collides with the Playdate SDK's pd_api_lua.h. */
@@ -39,32 +41,20 @@ extern uintptr_t open8_vm_preflight_min_sp(void);
 #ifdef OPEN8_VM_DTCM_EXEC
 extern int open8_dtcm_exec_init(PlaydateAPI* pd);
 extern int open8_dtcm_exec_check(void);
+extern void open8_dtcm_exec_disable(void);
 #endif
 
 #include "SDL3/SDL.h"    /* SDL_GAMEPAD_BUTTON_* (so the button mapping stays in sync) */
 
-#include "generated/cart_celeste.h"
-#include "generated/cart_jelpi.h"
-#include "generated/cart_racer.h"
-#include "generated/cart_picross.h"
+#define CART_FOLDER "/Shared/Emulation/p8/games/"
+#define MAX_CART_FILE_SIZE (2 * 1024 * 1024)
 
-/* Test matrix (docs/playdate-port.md): real game / fill-heavy / VM-heavy / light.
- * Switchable at runtime via the system menu so we can record a split per cart.
- * Populated at init because the xxd `*_len` symbols are runtime globals. */
-typedef struct { const char* name; const unsigned char* data; unsigned int len; } cart_entry;
-#define NUM_CARTS 4
-static cart_entry  g_carts[NUM_CARTS];
-static const char* g_cart_titles[NUM_CARTS];
-static int         g_cart_index = 0;
-
-static void init_cart_registry(void)
-{
-    g_carts[0] = (cart_entry){ "celeste", celeste_cart, celeste_cart_len };
-    g_carts[1] = (cart_entry){ "jelpi",   jelpi_cart,   jelpi_cart_len };
-    g_carts[2] = (cart_entry){ "racer",   racer_cart,   racer_cart_len };
-    g_carts[3] = (cart_entry){ "picross", picross_cart, picross_cart_len };
-    for (int i = 0; i < NUM_CARTS; i++) g_cart_titles[i] = g_carts[i].name;
-}
+static const char* g_cart_extensions[] = { "p8", "png", NULL };
+typedef enum { APP_PICKER, APP_EMULATOR } app_mode;
+static app_mode g_mode = APP_PICKER;
+static int g_picker_requested = 0;
+static char g_pending_cart[ROM_PICKER_MAX_PATH];
+static char g_cart_name[ROM_PICKER_MAX_PATH] = "picker";
 
 /* PICO-8's 128x128 is nearest-neighbour upscaled to a SCALE_W x SCALE_H square,
  * centred in the 400x240 frame, with ordered (Bayer 4x4) dithering so the 16
@@ -225,30 +215,157 @@ static uint32_t to_us(uint32_t delta)
 static int g_log_first = 1; /* reset on each cart (re)boot to re-log frame1 */
 static int g_gc_off = 0;    /* GC diagnostic: 1 = Lua collector stopped */
 
-static void boot_cart(int idx)
+static const char* cart_basename(const char* path)
 {
-    if (idx < 0 || idx >= NUM_CARTS) return;
-    g_booted = 0;
-    g_cart_index = idx;
-    g_pd->system->logToConsole("open8: booting '%s' (%u bytes)...",
-                               g_carts[idx].name, g_carts[idx].len);
-    if (core_pd_boot_cart(g_carts[idx].data, (long)g_carts[idx].len))
-    {
-        g_booted = 1;
-        g_log_first = 1;
-        core_pd_set_gc(!g_gc_off); /* re-apply: a fresh VM starts with GC on */
-        g_pd->system->logToConsole("open8: '%s' booted OK", g_carts[idx].name);
-    }
+    const char* name = strrchr(path, '/');
+    return name ? name + 1 : path;
+}
+
+static void set_cart_name(const char* path)
+{
+    const char* name = cart_basename(path);
+    snprintf(g_cart_name, sizeof(g_cart_name), "%s", name);
+    size_t len = strlen(g_cart_name);
+    if (len >= 7 && strcmp(g_cart_name + len - 7, ".p8.png") == 0)
+        g_cart_name[len - 7] = '\0';
     else
     {
-        g_pd->system->logToConsole("open8: '%s' boot FAILED", g_carts[idx].name);
+        char* dot = strrchr(g_cart_name, '.');
+        if (dot) *dot = '\0';
     }
 }
 
-static void cart_menu_cb(void* ud)
+static int read_cart_file(const char* path, uint8_t** data_out, int* size_out)
 {
-    PDMenuItem* item = (PDMenuItem*)ud;
-    boot_cart(g_pd->system->getMenuItemValue(item));
+    SDFile* file = g_pd->file->open(path, kFileRead | kFileReadData);
+    if (!file)
+    {
+        g_pd->system->logToConsole("open8: open '%s' failed: %s",
+                                   path, g_pd->file->geterr());
+        return 0;
+    }
+
+    if (g_pd->file->seek(file, 0, SEEK_END) < 0)
+    {
+        g_pd->system->logToConsole("open8: seek '%s' failed: %s",
+                                   path, g_pd->file->geterr());
+        g_pd->file->close(file);
+        return 0;
+    }
+    int size = g_pd->file->tell(file);
+    g_pd->file->seek(file, 0, SEEK_SET);
+    if (size <= 0 || size > MAX_CART_FILE_SIZE)
+    {
+        g_pd->system->logToConsole("open8: invalid cart size %d for '%s'",
+                                   size, path);
+        g_pd->file->close(file);
+        return 0;
+    }
+
+    uint8_t* data = (uint8_t*)malloc((size_t)size);
+    if (!data)
+    {
+        g_pd->system->logToConsole("open8: couldn't allocate %d cart bytes",
+                                   size);
+        g_pd->file->close(file);
+        return 0;
+    }
+
+    int total = 0;
+    while (total < size)
+    {
+        int got = g_pd->file->read(file, data + total,
+                                   (unsigned int)(size - total));
+        if (got <= 0) break;
+        total += got;
+    }
+    g_pd->file->close(file);
+    if (total != size)
+    {
+        g_pd->system->logToConsole("open8: short read %d/%d for '%s'",
+                                   total, size, path);
+        free(data);
+        return 0;
+    }
+
+    *data_out = data;
+    *size_out = size;
+    return 1;
+}
+
+static int boot_cart_file(const char* path)
+{
+    uint8_t* data = NULL;
+    int size = 0;
+    g_booted = 0;
+    if (!read_cart_file(path, &data, &size)) return 0;
+
+#ifdef OPEN8_VM_DTCM_EXEC
+    /* Load + init the VM on the FLASH VM. The PNG decoder (stb_image) puts a
+     * ~4.5 KB zlib/Huffman buffer on the stack; through the picker->boot call
+     * chain the stack dips into the tiny DTCM pool and would clobber a relocated
+     * VM. We relocate only AFTER the load completes; gameplay's stack stays
+     * shallow (measured +3.6 KB clear of the pool), so DTCM then survives. */
+    open8_dtcm_exec_disable();
+#endif
+
+    g_pd->system->logToConsole("open8: booting '%s' (%d bytes)...",
+                               cart_basename(path), size);
+    int ok = core_pd_boot_cart(data, (long)size);
+    free(data);
+    if (!ok)
+    {
+        g_pd->system->logToConsole("open8: '%s' boot FAILED",
+                                   cart_basename(path));
+        return 0;
+    }
+
+#ifdef OPEN8_VM_DTCM_EXEC
+    /* Deep-stack load is done; relocate the VM into DTCM for fast gameplay. */
+    open8_dtcm_exec_init(g_pd);
+#endif
+
+    set_cart_name(path);
+    g_booted = 1;
+    g_mode = APP_EMULATOR;
+    g_log_first = 1;
+    core_pd_set_gc(!g_gc_off); /* a fresh VM starts with GC on */
+    g_pd->graphics->clear(kColorBlack);
+    g_pd->system->logToConsole("open8: '%s' booted OK", g_cart_name);
+    return 1;
+}
+
+static void on_cart_picked(const char* path, void* userdata)
+{
+    (void)userdata;
+    snprintf(g_pending_cart, sizeof(g_pending_cart), "%s", path);
+}
+
+static void start_picker(void)
+{
+    core_pd_unload_cart();
+    rom_picker_free();
+    g_booted = 0;
+    g_mode = APP_PICKER;
+    g_picker_requested = 0;
+    g_pending_cart[0] = '\0';
+    snprintf(g_cart_name, sizeof(g_cart_name), "picker");
+
+    RomPickerConfig config = {
+        .folder = CART_FOLDER,
+        .extensions = g_cart_extensions,
+        .on_select = on_cart_picked,
+        .userdata = NULL,
+        .auto_load_single = 0,
+    };
+    rom_picker_init(g_pd, &config);
+}
+
+static void picker_menu_cb(void* userdata)
+{
+    (void)userdata;
+    if (g_mode == APP_EMULATOR)
+        g_picker_requested = 1;
 }
 
 #ifdef OPEN8_PROFILE_TOOLS
@@ -271,6 +388,24 @@ static void gc_menu_cb(void* ud)
 static int update(void* userdata)
 {
     PlaydateAPI* pd = (PlaydateAPI*)userdata;
+
+    if (g_picker_requested && g_mode == APP_EMULATOR)
+        start_picker();
+
+    if (g_mode == APP_PICKER)
+    {
+        rom_picker_update();
+        if (g_pending_cart[0] != '\0')
+        {
+            char path[ROM_PICKER_MAX_PATH];
+            snprintf(path, sizeof(path), "%s", g_pending_cart);
+            g_pending_cart[0] = '\0';
+            rom_picker_free();
+            if (!boot_cart_file(path))
+                start_picker();
+        }
+        return 1;
+    }
 
     if (!g_booted)
     {
@@ -348,7 +483,7 @@ static int update(void* userdata)
         char line[64];
         pd->graphics->setFont(g_font);
         int n;
-        n = snprintf(line, sizeof(line), "%s", g_carts[g_cart_index].name);
+        n = snprintf(line, sizeof(line), "%s", g_cart_name);
         pd->graphics->drawText(line, n, kASCIIEncoding, 4, 4);
         n = snprintf(line, sizeof(line), "%s%s",
                      skip ? "NF" : "", g_gc_off ? (skip ? " GC" : "GC") : "");
@@ -371,7 +506,7 @@ static int update(void* userdata)
         last_log_ms = now_ms;
 #ifdef OPEN8_PROFILE_LOAD
         pd->system->logToConsole("cart=%s nofill=%d gcoff=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus  | upd[i=%lu c=%lu] drw[i=%lu c=%lu]",
-                                 g_carts[g_cart_index].name, skip, g_gc_off,
+                                 g_cart_name, skip, g_gc_off,
                                  (int)(fps + 0.5f),
                                  (unsigned long)us_update,
                                  (unsigned long)us_draw,
@@ -380,7 +515,7 @@ static int update(void* userdata)
                                  (unsigned long)di, (unsigned long)dc);
 #else
         pd->system->logToConsole("cart=%s nofill=%d gcoff=%d  fps=%d  t_update=%luus  t_draw=%luus  t_blit=%luus",
-                                 g_carts[g_cart_index].name,
+                                 g_cart_name,
                                  skip, g_gc_off,
                                  (int)(fps + 0.5f),
                                  (unsigned long)us_update,
@@ -458,7 +593,6 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
     {
         g_pd = pd;
         pd_shim_init(pd);
-        init_cart_registry();
         pd->system->logToConsole("open8: [1] init, shim ready");
 
         build_display_tables();
@@ -503,24 +637,25 @@ int eventHandler(PlaydateAPI* pd, PDSystemEvent event, uint32_t arg)
 #endif
 
         pd->system->logToConsole("open8: [4] core_pd_init...");
-        if (!core_pd_init())
+        int core_ready = core_pd_init();
+        if (!core_ready)
         {
             pd->system->logToConsole("open8: core_pd_init() FAILED");
         }
-        else
+
+        /* DTCM relocation is now done per-cart in boot_cart_file (after the
+         * deep-stack PNG load), not at startup. */
+
+        if (core_ready)
         {
-            pd->system->logToConsole("open8: [5] booting first cart...");
-            boot_cart(0);
+            pd->system->logToConsole("open8: [5] starting cart picker at %s",
+                                     CART_FOLDER);
+            start_picker();
         }
 
-#ifdef OPEN8_VM_DTCM_EXEC
-        open8_dtcm_exec_init(pd);
-#endif
-
-        /* System menu: pick a test cart; diagnostic probes are opt-in builds. */
-        PDMenuItem* cart_item =
-            pd->system->addOptionsMenuItem("cart", g_cart_titles, NUM_CARTS, cart_menu_cb, NULL);
-        pd->system->setMenuItemUserdata(cart_item, cart_item);
+        /* Cart switching is requested here and performed from update(), outside
+         * the Playdate system-menu callback. */
+        pd->system->addMenuItem("ROM Picker", picker_menu_cb, NULL);
 #ifdef OPEN8_PROFILE_TOOLS
         PDMenuItem* skip_item =
             pd->system->addCheckmarkMenuItem("no fill", 0, skipfill_menu_cb, NULL);

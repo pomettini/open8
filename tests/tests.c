@@ -12,8 +12,69 @@
 #include "z8lua/lua.h"
 #include "z8lua/lualib.h"
 #include "api.h"
+#include "p8_text.h"
 
 static uint8_t ram[32768];
+
+static int test_p8_text_parser(void)
+{
+    FILE* file = fopen("unit_tests.p8", "rb");
+    if (!file)
+    {
+        SDL_Log("Couldn't open unit_tests.p8");
+        return 0;
+    }
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    uint8_t* source = malloc((size_t)size);
+    if (!source || fread(source, 1, (size_t)size, file) != (size_t)size)
+    {
+        SDL_Log("Couldn't read unit_tests.p8");
+        free(source);
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+
+    uint8_t cart_data[0x8020];
+    uint8_t* code = NULL;
+    uint32_t code_size = 0;
+    int ok = p8_text_parse(source, (size_t)size, cart_data,
+                           &code, &code_size);
+    free(source);
+    if (!ok)
+    {
+        SDL_Log(".p8 parser failed: %s", p8_text_error());
+        return 0;
+    }
+
+    uint16_t first_note =
+        (uint16_t)cart_data[0x3200] |
+        ((uint16_t)cart_data[0x3201] << 8);
+    ok =
+        code_size > 0 && strstr((const char*)code, "function _init()") &&
+        cart_data[0x0000] == 0x21 &&
+        cart_data[0x3000] == 0xab &&
+        cart_data[0x2000] == 0x0b &&
+        cart_data[0x2001] == 0x0c &&
+        cart_data[0x3240] == 0x00 &&
+        cart_data[0x3241] == 0x01 &&
+        first_note == (uint16_t)(0x21 | (7 << 9) | (3 << 12)) &&
+        cart_data[0x3100] == 0x81 &&
+        cart_data[0x3101] == 0x02 &&
+        cart_data[0x3102] == 0x83 &&
+        cart_data[0x3103] == 0x04;
+    free(code);
+
+    if (!ok)
+    {
+        SDL_Log(".p8 parser produced unexpected cartridge data");
+        return 0;
+    }
+    SDL_Log(".p8 text parser passed");
+    return 1;
+}
 
 static int lcf_results(lua_State* L)
 {
@@ -68,6 +129,11 @@ static void register_lcf_tests(lua_State* L)
 
 int main()
 {
+    if (!test_p8_text_parser())
+    {
+        return EXIT_FAILURE;
+    }
+
     lua_State* vm = luaL_newstate();
     if (!vm)
     {

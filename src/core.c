@@ -20,6 +20,7 @@
 #include "audio.h"
 #include "core.h"
 #include "memory.h"
+#include "p8_text.h"
 
 #ifdef OPEN8_ARENA_ALLOC
 #include "arena_alloc.h"
@@ -416,10 +417,9 @@ static void patch_cart_code(cart_t* cart)
 }
 
 // Load a cart from a PNG image already in memory (the .p8.png steganography
-// format). Does not take ownership of `data` — the caller frees it. Split out
-// of load_cart so the Playdate backend can load an embedded cart without a
-// filesystem.
-static int load_cart_bytes(SDL_Renderer* renderer, const uint8_t* data, long file_size, cart_t* cart)
+// format). Does not take ownership of `data`.
+static int load_png_cart_bytes(SDL_Renderer* renderer, const uint8_t* data,
+                               long file_size, cart_t* cart)
 {
     int width, height, bpp;
 
@@ -456,6 +456,7 @@ static int load_cart_bytes(SDL_Renderer* renderer, const uint8_t* data, long fil
     {
         SDL_Log("Couldn't update texture: %s", SDL_GetError());
         SDL_DestroyTexture(cart->image);
+        cart->image = NULL;
         stbi_image_free(image_data);
         return 0;
     }
@@ -475,6 +476,7 @@ static int load_cart_bytes(SDL_Renderer* renderer, const uint8_t* data, long fil
     {
         SDL_Log("Could not allocate code memory: %s", SDL_GetError());
         SDL_DestroyTexture(cart->image);
+        cart->image = NULL;
         return 0;
     }
 
@@ -506,13 +508,17 @@ static int load_cart_bytes(SDL_Renderer* renderer, const uint8_t* data, long fil
     }
 
     // Release the allocated memory we don't need.
-    cart->code = SDL_realloc(cart->code, cart->code_size);
-    if (!cart->code)
+    uint8_t* compact_code = SDL_realloc(cart->code, cart->code_size);
+    if (!compact_code)
     {
         SDL_Log("Could not re-allocate code memory: %s", SDL_GetError());
+        SDL_free(cart->code);
+        cart->code = NULL;
         SDL_DestroyTexture(cart->image);
+        cart->image = NULL;
         return 0;
     }
+    cart->code = compact_code;
 
     if (status == 1)
     {
@@ -525,6 +531,44 @@ static int load_cart_bytes(SDL_Renderer* renderer, const uint8_t* data, long fil
     }
 
     return 1;
+}
+
+static int load_text_cart_bytes(const uint8_t* data, long file_size,
+                                cart_t* cart)
+{
+    if (!p8_text_parse(data, (size_t)file_size, cart->cart_data,
+                       &cart->code, &cart->code_size))
+    {
+        SDL_Log("Couldn't parse .p8 cartridge: %s", p8_text_error());
+        return 0;
+    }
+
+    cart->image = NULL;
+    cart->is_corrupt = false;
+    patch_cart_code(cart);
+    return 1;
+}
+
+static int is_png_cart(const uint8_t* data, long file_size)
+{
+    static const uint8_t png_signature[8] =
+        { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    return file_size >= 8 && memcmp(data, png_signature, 8) == 0;
+}
+
+// Load either a textual .p8 or an encoded .p8.png/.png cartridge from memory.
+// Content-based detection means mixed-case and double extensions both work.
+static int load_cart_bytes(SDL_Renderer* renderer, const uint8_t* data,
+                           long file_size, cart_t* cart)
+{
+    if (!data || file_size <= 0)
+    {
+        SDL_Log("Empty cartridge data");
+        return 0;
+    }
+    if (is_png_cart(data, file_size))
+        return load_png_cart_bytes(renderer, data, file_size, cart);
+    return load_text_cart_bytes(data, file_size, cart);
 }
 
 static int load_cart(SDL_Renderer* renderer, const char* file_name, cart_t* cart)
@@ -566,12 +610,16 @@ static void destroy_cart(cart_t* cart)
     {
         SDL_DestroyTexture(cart->image);
     }
+    cart->image = NULL;
 
     if (cart->code)
     {
         SDL_free(cart->code);
     }
     cart->code = NULL;
+    cart->code_size = 0;
+    cart->is_corrupt = false;
+    SDL_memset(cart->cart_data, 0, sizeof(cart->cart_data));
 }
 
 static bool is_function_present(lua_State* L, const char* func_name)
@@ -642,7 +690,7 @@ static bool run_cartridge(SDL_Renderer* renderer)
 
     // Copy spritesheet, map, flags, music and sound effects data to memory.
     // 0x0000-0x42ff
-    SDL_memcpy(pico8_ram, cart.cart_data, 0x42ff * sizeof(uint8_t));
+    SDL_memcpy(pico8_ram, cart.cart_data, 0x4300 * sizeof(uint8_t));
 
     if (!cart.is_corrupt)
     {
@@ -1431,9 +1479,22 @@ bool core_pd_boot_cart(const uint8_t* data, long size)
 
     if (!load_cart_bytes(pd_dummy_renderer, data, size, &cart))
     {
+        destroy_cart(&cart);
         return false;
     }
     return run_cartridge(pd_dummy_renderer);
+}
+
+void core_pd_unload_cart(void)
+{
+    destroy_vm();
+    destroy_cart(&cart);
+    reset_memory();
+    audio_reset();
+    has_update = false;
+    has_update60 = false;
+    has_draw = false;
+    state = STATE_MENU;
 }
 
 void core_pd_update(void)

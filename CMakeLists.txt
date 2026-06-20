@@ -26,6 +26,7 @@ set(open8_sources
   src/audio.c
   src/core.c
   src/memory.c
+  src/p8_text.c
   src/p8scii.c
   src/lexaloffle/p8_compress.c
   src/lexaloffle/pxa_compress_snippets.c)

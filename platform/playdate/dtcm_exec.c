@@ -161,6 +161,17 @@ int open8_dtcm_exec_init(PlaydateAPI* pd)
 #endif
 }
 
+void open8_dtcm_exec_disable(void)
+{
+#if defined(__arm__)
+    if (g_active)
+    {
+        open8_vm_use_original();
+        g_active = 0;
+    }
+#endif
+}
+
 int open8_dtcm_exec_check(void)
 {
 #if defined(__arm__)

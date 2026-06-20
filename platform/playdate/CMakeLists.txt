@@ -72,9 +72,11 @@ set(OPEN8_SOURCES
 	${OPEN8_SRC}/api.c
 	${OPEN8_SRC}/core.c
 	${OPEN8_SRC}/memory.c
+	${OPEN8_SRC}/p8_text.c
 	${OPEN8_SRC}/auxiliary.c
 	${OPEN8_SRC}/audio.c
 	${OPEN8_SRC}/p8scii.c
+	${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pd-rom-picker/src/rom_picker.c
 	${OPEN8_SRC}/lexaloffle/p8_compress.c
 	${OPEN8_SRC}/lexaloffle/pxa_compress_snippets.c
 	# z8lua VM.
@@ -100,7 +102,8 @@ if (OPEN8_VM_DTCM_EXEC)
 endif()
 
 if (TOOLCHAIN STREQUAL "armgcc")
-	# Device build needs newlib syscall stubs (carts are embedded; no POSIX FS).
+	# Device build needs newlib syscall stubs. External carts use pd->file,
+	# never POSIX stdio.
 	add_executable(${PLAYDATE_GAME_DEVICE} ${OPEN8_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/shim/pd_syscalls.c)
 	set(OPEN8_TARGET ${PLAYDATE_GAME_DEVICE})
 else()
@@ -153,8 +156,9 @@ if (OPEN8_ARENA_ALLOCATOR)
 endif()
 
 target_include_directories(${OPEN8_TARGET} PRIVATE
-	${CMAKE_CURRENT_SOURCE_DIR}          # generated/cart_celeste.h
+	${CMAKE_CURRENT_SOURCE_DIR}
 	${CMAKE_CURRENT_SOURCE_DIR}/shim     # SDL3/SDL.h shim, pdshim.h
+	${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pd-rom-picker/src
 	${OPEN8_SRC}                         # api.h, core.h, memory.h, lexaloffle/, misc/
 	${OPEN8_SRC}/z8lua)                  # lua.h and friends
 

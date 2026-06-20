@@ -2,9 +2,9 @@
  *
  *  Minimal newlib syscall stubs for the Playdate *device* (armgcc) build.
  *
- *  open8's cart loader and stb_image reference the stdio/POSIX layer
- *  (fopen/fread/...). On Playdate we never use them — carts are loaded from an
- *  embedded byte array and file access (later) goes through pd->file, not POSIX.
+ *  open8's desktop cart loader and stb_image reference the stdio/POSIX layer
+ *  (fopen/fread/...). On Playdate external carts are read through pd->file, not
+ *  POSIX.
  *  But newlib still pulls these symbols at link time, so provide no-op stubs.
  *  Memory (malloc/realloc/free) is supplied by the SDK's setup.c.
  *
